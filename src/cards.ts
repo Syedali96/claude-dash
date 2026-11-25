@@ -101,6 +101,14 @@ export interface DashState {
     history: { q: string; a: string }[];
     error: string | null;
   };
+  listen: {
+    // off: not listening. listening: only the dots. thinking/answer/error: the mic keeps going underneath.
+    phase: "off" | "listening" | "thinking" | "answer" | "error";
+    topic: string;
+    lines: string[]; // the key points, wrapped
+    page: number;
+    error: string | null;
+  };
   gym: {
     sets: LoggedSet[];
     recording: boolean;
@@ -618,6 +626,56 @@ function askBody(st: DashState): Body {
   }
 }
 
+// ---------- listen ----------
+
+export const LISTEN_SECONDS = 120; // how far back a tap looks
+
+/** Key points as "◆ ..." lines, wrapped under the topic tile. */
+export function listenLines(points: string[]): string[] {
+  const cols = colsFor(ANSWER.w, false);
+  return points.flatMap((p) => wrap(`◆ ${p}`, cols, "   "));
+}
+
+export function listenPages(st: DashState): number {
+  return pagesOf(listenGroups(st), answerRows()).length;
+}
+
+/** Keep each wrapped point together on one page. */
+function listenGroups(st: DashState): string[][] {
+  const out: string[][] = [];
+  for (const l of st.listen.lines) {
+    if (l.startsWith("◆") || !out.length) out.push([l]);
+    else out[out.length - 1].push(l);
+  }
+  return out;
+}
+
+function listenBody(st: DashState): Body {
+  const l = st.listen;
+  switch (l.phase) {
+    case "listening":
+      return { tiles: [box(240, 80, 96, 40, ["●  ●  ●"], { border: false, dim: true, capture: true })] };
+    case "thinking":
+      return { tiles: [box(ANSWER.x, 2, ANSWER.w, 196, ["Looking into it..."], { border: false, capture: true })] };
+    case "answer": {
+      const p = pagesOf(listenGroups(st), answerRows());
+      return {
+        tiles: [
+          box(8, 2, 560, 42, [trim(l.topic.toUpperCase(), COLS - 2)]),
+          box(ANSWER.x, ANSWER.y, ANSWER.w, ANSWER.h, p[Math.min(l.page, p.length - 1)], { border: false, capture: true }),
+        ],
+      };
+    }
+    case "error":
+      return message(`${l.error ?? "Something went wrong."}\n\nStill listening. Tap to go back to the dots.`);
+    default:
+      return {
+        tiles: [full(["Tap to start listening.", "Then tap any time to learn more about", "what you're talking about.", "",
+          "Uses the last 2 minutes. Nothing is saved."])],
+      };
+  }
+}
+
 // ---------- the cards ----------
 
 const shortDate = (d: Date) => d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
@@ -678,6 +736,22 @@ export const CARDS: Record<CardId, CardDef> = {
     },
     body: askBody,
   },
+  listen: {
+    title: () => "LISTEN",
+    tapHint: (st) => {
+      const l = st.listen;
+      if (l.phase === "off") return "tap  start";
+      if (l.phase === "thinking") return "";
+      if (l.phase === "answer") {
+        const n = listenPages(st);
+        const more = l.page + 1 < n;
+        return `${n > 1 ? `${l.page + 1}/${n}   ` : ""}${more ? "tap  more   2x  back" : "tap  back"}`;
+      }
+      if (l.phase === "error") return "tap  back   2x  stop";
+      return "";
+    },
+    body: listenBody,
+  },
   brief: {
     title: (st) => (st.brief.at ? `DAY PLAN  ·  as of ${clock(st.brief.at, st.settings.use24h)}` : "DAY PLAN"),
     tapHint: (st) => {
@@ -697,7 +771,9 @@ export const CARDS: Record<CardId, CardDef> = {
 
 /** Footer: page dots on the left, a short dim hint on the right. */
 export function footer(st: DashState, current: number): { dots: string; hint: string } {
-  const dots = st.settings.cards.map((_, i) => (i === current ? "●" : "○")).join(" ");
+  // On the Listen card, "● ● ●" in the corner means the mic is still on.
+  const listening = st.settings.cards[current] === "listen" && st.listen.phase !== "off" && !alertFrame(st);
+  const dots = listening ? "● ● ●" : st.settings.cards.map((_, i) => (i === current ? "●" : "○")).join(" ");
   if (!st.settings.showHints) return { dots, hint: "" };
   const alert = alertFrame(st);
   return { dots, hint: alert ? alert.hint : CARDS[st.settings.cards[current]].tapHint(st) };

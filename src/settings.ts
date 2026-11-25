@@ -2,12 +2,13 @@
 // Stored through the Even app's storage, so it survives restarts.
 import type { EvenAppBridge } from "@evenrealities/even_hub_sdk";
 
-export type CardId = "agenda" | "news" | "inbox" | "gym" | "brief" | "ask";
+export type CardId = "agenda" | "news" | "inbox" | "gym" | "brief" | "ask" | "listen";
 
 export const CARD_LABELS: Record<CardId, string> = {
   agenda: "Today (schedule, WHOOP + inbox, email alerts)",
   news: "News (markets + top stories)",
   ask: "Ask Claude (voice)",
+  listen: "Listen (tap to learn about your conversation)",
   inbox: "Inbox (reply + follow up)",
   gym: "Gym log (voice)",
   brief: "Day plan (Claude + WHOOP)",
@@ -30,7 +31,7 @@ export interface Settings {
   showHints: boolean; // gesture hints in the footer
 }
 
-export const SETTINGS_VERSION = 11;
+export const SETTINGS_VERSION = 12;
 
 export const DAY_PLAN_PROMPT = "Suggest what I should focus on for the rest of today.";
 const V5_PROMPT =
@@ -41,7 +42,7 @@ export const DEFAULTS: Settings = {
   version: SETTINGS_VERSION,
   serverUrl: "",
   accessToken: "",
-  cards: ["agenda", "news", "inbox", "gym", "brief", "ask"],
+  cards: ["agenda", "news", "inbox", "gym", "brief", "ask", "listen"],
   briefPrompt: DAY_PLAN_PROMPT,
   tasks: ["Reply to investor emails", "Review reel cuts", "Gym at 6pm"],
   sleepSeconds: 30,
@@ -91,6 +92,11 @@ export async function loadSettings(bridge: EvenAppBridge | null): Promise<Settin
     }
     // v10 added the Ask Claude card at the end.
     if ((parsed.version ?? 1) < 10 && !merged.cards.includes("ask")) merged.cards.push("ask");
+    // v12 added the Listen card: put it right after Ask Claude.
+    if ((parsed.version ?? 1) < 12 && !merged.cards.includes("listen")) {
+      const i = merged.cards.indexOf("ask");
+      merged.cards.splice(i >= 0 ? i + 1 : merged.cards.length, 0, "listen");
+    }
     merged.version = SETTINGS_VERSION;
     return merged;
   } catch {

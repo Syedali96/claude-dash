@@ -12,7 +12,7 @@ interface Hooks {
 }
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
-const ALL: CardId[] = ["agenda", "news", "inbox", "gym", "brief", "ask"];
+const ALL: CardId[] = ["agenda", "news", "inbox", "gym", "brief", "ask", "listen"];
 
 export function mountPhoneUI(initial: Settings, hooks: Hooks) {
   let s = structuredClone(initial);

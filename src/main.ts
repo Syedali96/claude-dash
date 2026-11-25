@@ -8,7 +8,7 @@ import {
   waitForEvenAppBridge,
 } from "@evenrealities/even_hub_sdk";
 import { ApiError, api } from "./api";
-import { alertFrame, alertPages, askPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
+import { alertFrame, alertPages, askPages, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
 import { drawBlank, drawFrame, type Frame, MENU, shapeChanged, updateRegion, updateTile } from "./layout";
 import { canonicalName, exerciseKey, nextTip } from "./exercises";
 import { mountPhoneUI } from "./phone";
@@ -37,6 +37,7 @@ const st: DashState = {
   whoop: null,
   briefPage: 0,
   ask: { phase: "ready", followUp: false, question: "", lines: [], page: 0, history: [], error: null },
+  listen: { phase: "off", topic: "", lines: [], page: 0, error: null },
   gym: {
     sets: await loadGym(null), recording: false, busy: false, message: null, restEndsAt: null, restLabel: "", notice: null,
     recovery: null, sessionStart: 0, summary: null,
@@ -45,6 +46,10 @@ const st: DashState = {
 
 function frame(): Frame {
   const id = st.settings.cards[current];
+  // Listening: nothing on screen but three dim dots.
+  if (id === "listen" && st.listen.phase === "listening" && !st.alertView) {
+    return { title: " ", status: " ", body: CARDS.listen.body(st), dots: " ", hint: " " };
+  }
   const body = alertFrame(st)?.body ?? CARDS[id].body(st); // a new-email pop-up covers the card
   return { ...header(st, current, battery), body, ...footer(st, current) };
 }
@@ -211,7 +216,7 @@ async function pollAlerts() {
     if (!fresh.length) return;
     st.alerts = [...fresh, ...st.alerts].slice(0, 20);
     // While you're speaking to the glasses (Ask or Gym), just add to the badge.
-    const recording = st.gym.recording || st.ask.phase === "listening" || st.ask.phase === "thinking";
+    const recording = st.gym.recording || st.ask.phase === "listening" || st.ask.phase === "thinking" || st.listen.phase !== "off";
     if (recording) return render();
     // Otherwise show it now: wake the display if it's asleep, and cover the current card.
     if (!st.alertView) st.alertView = { list: [...fresh], index: 0, expanded: false, page: 0, closeAt: Date.now() + POPUP_MS };
@@ -612,6 +617,87 @@ async function stopAsk() {
   await render(true);
 }
 
+// ---------- listen: keep the last 2 minutes, explain on tap ----------
+
+const LISTEN_MAX_BYTES = 16_000 * 2 * LISTEN_SECONDS; // 16 kHz, 16-bit, mono
+let listenBuf: Uint8Array[] = [];
+let listenBytes = 0;
+let listenAsk = 0; // ignores an answer that arrives after you went back or stopped
+
+/** Add mic audio to the rolling buffer, dropping the oldest beyond 2 minutes. Memory only. */
+function keepAudio(chunk: Uint8Array) {
+  listenBuf.push(chunk);
+  listenBytes += chunk.length;
+  while (listenBytes - listenBuf[0].length >= LISTEN_MAX_BYTES) listenBytes -= listenBuf.shift()!.length;
+}
+
+async function startListen() {
+  if (!bridge) {
+    st.listen = { ...st.listen, phase: "error", error: "Listening works on the glasses." };
+    return render(true);
+  }
+  listenBuf = []; listenBytes = 0;
+  const ok = await bridge.audioControl(true, AudioInputSource.Glasses).catch(() => false);
+  if (!ok) {
+    st.listen = { ...st.listen, phase: "error", error: "Mic didn't start." };
+    return render(true);
+  }
+  st.listen = { phase: "listening", topic: "", lines: [], page: 0, error: null };
+  await render(true);
+}
+
+/** Mic off and the audio thrown away. */
+async function stopListen() {
+  if (st.listen.phase === "off") return;
+  listenAsk++;
+  listenBuf = []; listenBytes = 0;
+  st.listen = { phase: "off", topic: "", lines: [], page: 0, error: null };
+  await bridge?.audioControl(false).catch(() => false);
+}
+
+/** Back to just the dots (the mic never stopped). */
+function backToDots() {
+  listenAsk++;
+  st.listen = { phase: "listening", topic: "", lines: [], page: 0, error: null };
+  return render(true);
+}
+
+async function explain(text?: string) {
+  const audio = new Uint8Array(listenBytes);
+  let at = 0;
+  for (const c of listenBuf) { audio.set(c, at); at += c.length; }
+  const id = ++listenAsk;
+  st.listen = { ...st.listen, phase: "thinking", error: null };
+  await render(true);
+  try {
+    const res = await api<{ topic: string; points: string[] }>(st.settings, "/api/listen", {
+      method: "POST",
+      body: JSON.stringify({
+        ...(text ? { text } : { audio: toBase64(audio) }),
+        now: new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }),
+    });
+    if (id !== listenAsk) return;
+    if (!res.topic) st.listen = { ...st.listen, phase: "error", error: "Didn't hear enough to explain yet." };
+    else st.listen = { ...st.listen, phase: "answer", topic: res.topic, lines: listenLines(res.points), page: 0 };
+  } catch (e) {
+    if (id !== listenAsk) return;
+    st.listen = { ...st.listen, phase: "error", error: e instanceof Error ? e.message : "Couldn't reach Claude." };
+  }
+  await render(true);
+}
+
+/** Testing only (npm run dev): ?listentest=<transcript> shows the answer; ?listentest=dots shows the listening screen. */
+async function listenDevTest() {
+  if (!import.meta.env.DEV) return;
+  const text = new URLSearchParams(location.search).get("listentest");
+  if (!text) return;
+  current = Math.max(0, st.settings.cards.indexOf("listen"));
+  st.listen = { phase: "listening", topic: "", lines: [], page: 0, error: null };
+  if (text !== "dots") await explain(text);
+}
+
 // ---------- input ----------
 
 function toGesture(ev: EvenHubEvent): Gesture | null {
@@ -663,6 +749,14 @@ async function onTap() {
     if (a.phase === "answer" && a.page + 1 < askPages(st)) { a.page++; return render(); }
     return startAsk(a.history.length > 0); // keeps the conversation going; 2x starts fresh
   }
+  if (id === "listen") {
+    const l = st.listen;
+    if (l.phase === "off") return startListen();
+    if (l.phase === "listening") return explain();
+    if (l.phase === "answer" && l.page + 1 < listenPages(st)) { l.page++; return render(); }
+    if (l.phase === "answer" || l.phase === "error") return bridge ? backToDots() : stopListen().then(() => render(true));
+    return; // thinking
+  }
   if (id === "gym") {
     const sum = st.gym.summary;
     if (sum) {
@@ -689,7 +783,7 @@ let asleep = false;
 let lastInput = Date.now();
 
 function busy(): boolean {
-  return st.gym.recording || st.gym.busy || (st.gym.restEndsAt ?? 0) > Date.now() || st.ask.phase === "listening" || st.ask.phase === "thinking";
+  return st.gym.recording || st.gym.busy || (st.gym.restEndsAt ?? 0) > Date.now() || st.ask.phase === "listening" || st.ask.phase === "thinking" || st.listen.phase !== "off";
 }
 
 async function goToSleep() {
@@ -717,6 +811,13 @@ async function handle(g: Gesture) {
   if (g === "long") { await cancelAsk(); return goToSleep(); }
   // Leaving the Ask card while it listens cancels the question.
   if ((g === "next" || g === "prev") && card === "ask") await cancelAsk();
+  // Leaving the Listen card turns the mic off and forgets the audio.
+  if ((g === "next" || g === "prev") && card === "listen") await stopListen();
+  // Listen: double tap goes back to the dots, or stops listening from the dots.
+  if (g === "double" && card === "listen" && st.listen.phase !== "off") {
+    if (st.listen.phase === "listening" || st.listen.phase === "error") { await stopListen(); return render(true); }
+    return backToDots();
+  }
   // Ask: double tap starts a new chat (forgets the conversation).
   if (g === "double" && card === "ask") {
     if (st.ask.phase === "listening" || st.ask.phase === "thinking") return;
@@ -782,7 +883,8 @@ async function boot() {
     phone.showGym(st.gym.sets);
     bridge.onEvenHubEvent(async (ev) => {
       if (ev.audioEvent) {
-        if (st.gym.recording || st.ask.phase === "listening") pcm.push(toBytes(ev.audioEvent.audioPcm));
+        if (st.listen.phase !== "off") keepAudio(toBytes(ev.audioEvent.audioPcm));
+        else if (st.gym.recording || st.ask.phase === "listening") pcm.push(toBytes(ev.audioEvent.audioPcm));
         return;
       }
       if (ev.menuItemClickEvent) {
@@ -809,6 +911,7 @@ async function boot() {
 
   phone.showGym(st.gym.sets);
   await gymDevTest();
+  await listenDevTest();
   if (!st.settings.cards.length) st.settings.cards = ["agenda"];
   await render(true);
   refreshWeather();

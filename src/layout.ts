@@ -23,8 +23,8 @@ export const PAD = { tile: 6, free: 4 };
 export const REGION = {
   title: { id: 1, name: "title", x: 0, y: 0, w: 410, h: 39 },
   status: { id: 2, name: "status", x: 430, y: 0, w: 146, h: 39 }, // time + battery, tucked right
-  dots: { id: 3, name: "dots", x: 0, y: 246, w: 160, h: 42 },
-  hint: { id: 4, name: "hint", x: 160, y: 246, w: 416, h: 42 },
+  dots: { id: 3, name: "dots", x: 0, y: 246, w: 196, h: 42 }, // room for 7 card dots
+  hint: { id: 4, name: "hint", x: 196, y: 246, w: 380, h: 42 },
 } as const;
 const TILE_ID = 10; // tiles use ids 10, 11, 12, ... (at most 4 per screen)
 

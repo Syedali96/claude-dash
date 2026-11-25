@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { ask } from "./ask";
 import { alerts, inbox } from "./gmail";
 import { gymCommand, parseSet } from "./gym";
+import { listen } from "./listen";
 import { article, markets, news } from "./news";
 import { bedtime, finishWhoop, startWhoop, whoopConnected, whoopText, whoopTip, whoopToday } from "./whoop";
 import { ACCOUNTS, type AccountKey, agenda, finishAuth, isConnected, startAuth } from "./google";
@@ -96,6 +97,10 @@ export default {
         case "/api/ask":
           if (req.method !== "POST") return json({ error: "POST only" }, 405);
           return ask(req, env).then((r) => new Response(r.body, { status: r.status, headers: { "Content-Type": "application/json", ...CORS } }));
+        case "/api/listen":
+          if (req.method !== "POST") return json({ error: "POST only" }, 405);
+          if (!env.GROQ_API_KEY) return json({ error: "Groq key missing on the server." }, 500);
+          return listen(req, env).then((r) => new Response(r.body, { status: r.status, headers: { "Content-Type": "application/json", ...CORS } }));
         case "/api/markets":
           return json(await markets(env));
         case "/api/alerts": {
