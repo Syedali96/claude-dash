@@ -56,10 +56,9 @@ export function mountPhoneUI(initial: Settings, hooks: Hooks) {
     $<HTMLTextAreaElement>("#tasks").value = s.tasks.join("\n");
     $<HTMLTextAreaElement>("#prompt").value = s.briefPrompt;
     $<HTMLInputElement>("#sleep").value = String(s.sleepSeconds);
-    $<HTMLInputElement>("#rest").value = String(s.restSeconds);
+    for (const k of ["heavy", "compound", "isolation"] as const) $<HTMLInputElement>(`#rest-${k}`).value = String(s.rest[k]);
     $<HTMLInputElement>("#h24").checked = s.use24h;
     $<HTMLInputElement>("#hints").checked = s.showHints;
-    $<HTMLInputElement>("#speak").checked = s.speakAnswers;
     for (const k of ["header", "body", "footer"] as const) $<HTMLInputElement>(`#b-${k}`).value = String(s.brightness[k]);
     $<HTMLInputElement>("#server").value = s.serverUrl;
     $<HTMLInputElement>("#token").value = s.accessToken;
@@ -80,16 +79,16 @@ export function mountPhoneUI(initial: Settings, hooks: Hooks) {
     s.sleepSeconds = Number.isFinite(v) ? Math.min(600, Math.max(0, v)) : 30;
     emit();
   });
-  $("#rest").addEventListener("change", (e) => {
-    s.restSeconds = Math.min(600, Math.max(15, Number((e.target as HTMLInputElement).value) || 90));
-    emit();
-  });
+  for (const k of ["heavy", "compound", "isolation"] as const)
+    $(`#rest-${k}`).addEventListener("change", (e) => {
+      s.rest[k] = Math.min(600, Math.max(15, Number((e.target as HTMLInputElement).value) || s.rest[k]));
+      emit();
+    });
   $("#gym-undo").addEventListener("click", () => hooks.onGymUndo());
   $("#server").addEventListener("change", (e) => { s.serverUrl = (e.target as HTMLInputElement).value.trim(); fill(); emit(); });
   $("#token").addEventListener("change", (e) => { s.accessToken = (e.target as HTMLInputElement).value.trim(); fill(); emit(); });
   $("#h24").addEventListener("change", (e) => { s.use24h = (e.target as HTMLInputElement).checked; emit(); });
   $("#hints").addEventListener("change", (e) => { s.showHints = (e.target as HTMLInputElement).checked; emit(); });
-  $("#speak").addEventListener("change", (e) => { s.speakAnswers = (e.target as HTMLInputElement).checked; emit(); });
   for (const k of ["header", "body", "footer"] as const)
     $(`#b-${k}`).addEventListener("input", (e) => { s.brightness[k] = Number((e.target as HTMLInputElement).value); emit(); });
 

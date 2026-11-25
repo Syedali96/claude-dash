@@ -168,7 +168,7 @@ export async function ask(req: Request, env: Env): Promise<Response> {
   const webSearch = { type: "web_search_20260209" as const, name: "web_search" as const, max_uses: 2 };
 
   const messages: Anthropic.Beta.BetaMessageParam[] = [];
-  for (const h of (body.history ?? []).slice(-3)) {
+  for (const h of (body.history ?? []).slice(-6)) {
     messages.push({ role: "user", content: h.q }, { role: "assistant", content: h.a });
   }
   messages.push({ role: "user", content: `(Now: ${body.now ?? new Date().toISOString()}, time zone ${tz})\n${question}` });

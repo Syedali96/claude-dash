@@ -8,8 +8,9 @@ import {
   waitForEvenAppBridge,
 } from "@evenrealities/even_hub_sdk";
 import { ApiError, api } from "./api";
-import { alertFrame, alertPages, askPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restSeconds, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
+import { alertFrame, alertPages, askPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
 import { drawBlank, drawFrame, type Frame, MENU, shapeChanged, updateRegion, updateTile } from "./layout";
+import { canonicalName, exerciseKey } from "./exercises";
 import { mountPhoneUI } from "./phone";
 import { type LoggedSet, loadGym, loadSettings, saveGym, saveSettings } from "./settings";
 
@@ -36,7 +37,10 @@ const st: DashState = {
   whoop: null,
   briefPage: 0,
   ask: { phase: "ready", followUp: false, question: "", lines: [], page: 0, history: [], error: null },
-  gym: { sets: await loadGym(null), recording: false, busy: false, message: null, restEndsAt: null, recovery: null },
+  gym: {
+    sets: await loadGym(null), recording: false, busy: false, message: null, restEndsAt: null, restLabel: "", notice: null,
+    recovery: null, sessionStart: 0, summary: null,
+  },
 };
 
 function frame(): Frame {
@@ -348,34 +352,162 @@ async function stopRecording() {
   pcm = [];
 
   try {
-    const res = await api<{ text: string; set: Omit<LoggedSet, "t"> | null }>(st.settings, "/api/gym/parse", {
+    const today = sessionSets(st);
+    const res = await api<{ text: string; command: GymCommand }>(st.settings, "/api/gym/command", {
       method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: audio,
+      body: JSON.stringify({
+        audio: toBase64(audio),
+        today: today.map(({ exercise, weight, unit, reps }) => ({ exercise, weight, unit, reps })),
+        known: knownExercises(),
+      }),
     });
-    if (res.set) await logSet(res.set);
-    else st.gym.message = res.text ? `Heard "${res.text.slice(0, 28)}". Try again.` : "Didn't catch that. Tap to retry.";
+    await runGymCommand(res.command, res.text, today);
   } catch (e) {
     st.gym.message = e instanceof Error ? e.message : "Couldn't log that set.";
   }
   st.gym.busy = false;
-  await render();
+  await render(true);
 }
 
-async function logSet(set: Omit<LoggedSet, "t">) {
-  st.gym.sets = [...st.gym.sets, { ...set, t: Date.now() }];
+type GymCommand =
+  | { action: "log"; set: Omit<LoggedSet, "t"> }
+  | { action: "undo" }
+  | { action: "delete"; target: number }
+  | { action: "edit"; target: number; weight: number | null; reps: number | null; exercise: string | null }
+  | { action: "finish" }
+  | { action: "none" };
+
+/** Every exercise name you've logged, most recent first (so the server reuses your names). */
+function knownExercises(): string[] {
+  const seen = new Map<string, string>();
+  for (const s of [...st.gym.sets].reverse()) if (!seen.has(exerciseKey(s.exercise))) seen.set(exerciseKey(s.exercise), s.exercise);
+  return [...seen.values()];
+}
+
+/** "Bench Press 185x8 (set 2)" */
+function describe(set: LoggedSet, today: LoggedSet[]): string {
+  const same = today.filter((x) => exerciseKey(x.exercise) === exerciseKey(set.exercise));
+  const n = same.indexOf(set) + 1;
+  return `${set.exercise} ${fmtSet(set)}${same.length > 1 ? ` (set ${n})` : ""}`;
+}
+
+async function removeSet(set: LoggedSet, today: LoggedSet[], wasLast: boolean) {
+  const label = describe(set, today);
+  st.gym.sets = st.gym.sets.filter((x) => x !== set);
+  if (wasLast) st.gym.restEndsAt = null; // the rest was for the set you just removed
+  st.gym.notice = `REMOVED   ${label}`;
+  st.gym.message = st.gym.restEndsAt ? `Removed ${label}` : 'Say "undo" or "cancel that" anytime to remove the last set';
   await saveGym(bridge, st.gym.sets);
-  st.gym.restEndsAt = Date.now() + restSeconds(st) * 1000;
+  phone.showGym(st.gym.sets);
+}
+
+async function runGymCommand(cmd: GymCommand, heard: string, today: LoggedSet[]) {
+  st.gym.notice = null;
+  switch (cmd.action) {
+    case "log":
+      return logSet(cmd.set);
+    case "undo": {
+      const last = today[today.length - 1];
+      if (last) return removeSet(last, today, true);
+      st.gym.message = "No sets to remove yet.";
+      return;
+    }
+    case "delete": {
+      const set = today[cmd.target - 1];
+      if (set) return removeSet(set, today, cmd.target === today.length);
+      break;
+    }
+    case "edit": {
+      const set = today[cmd.target - 1];
+      if (!set) break;
+      const before = describe(set, today);
+      if (cmd.weight != null) set.weight = cmd.weight;
+      if (cmd.reps != null) set.reps = cmd.reps;
+      if (cmd.exercise) set.exercise = canonicalName(cmd.exercise, knownExercises());
+      st.gym.sets = [...st.gym.sets];
+      await saveGym(bridge, st.gym.sets);
+      phone.showGym(st.gym.sets);
+      st.gym.notice = `FIXED   ${describe(set, sessionSets(st))}`;
+      st.gym.message = st.gym.restEndsAt ? `Fixed: was ${before}` : `Was ${before}`;
+      return;
+    }
+    case "finish":
+      return finishWorkout();
+  }
+  st.gym.message = heard ? `Heard "${heard.slice(0, 28)}". Try again.` : "Didn't catch that. Tap to retry.";
+}
+
+/** "Workout complete": stop the timer and show the summary. */
+async function finishWorkout() {
+  st.gym.restEndsAt = null;
+  st.gym.message = null;
+  st.gym.summary = { end: Date.now(), page: 0 };
+  refreshWhoop(); // fresh strain for the summary
+}
+
+async function closeSummary() {
+  if (!st.gym.summary) return;
+  st.gym.sessionStart = st.gym.summary.end + 1; // later sets start a new workout
+  st.gym.summary = null;
+  await render(true);
+}
+
+async function logSet(heard: Omit<LoggedSet, "t">) {
+  const set = { ...heard, exercise: canonicalName(heard.exercise, knownExercises()) };
   // Show what you did last session for this exercise, so you know what to beat.
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const before = st.gym.sets.filter((x) => x.exercise.toLowerCase() === set.exercise.toLowerCase() && x.t < today.getTime());
+  const key = exerciseKey(set.exercise);
+  const before = st.gym.sets.filter((x) => exerciseKey(x.exercise) === key && x.t < today.getTime());
+  st.gym.sets = [...st.gym.sets, { ...set, t: Date.now() }];
+  await saveGym(bridge, st.gym.sets);
+  const rest = restFor(st, set.exercise);
+  st.gym.restEndsAt = Date.now() + rest.seconds * 1000;
+  st.gym.restLabel = rest.label;
   const lastDay = before.length ? new Date(before[before.length - 1].t).toDateString() : null;
   const last = lastDay ? before.filter((x) => new Date(x.t).toDateString() === lastDay) : [];
   const when = lastDay ? new Date(lastDay).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
-  st.gym.message = last.length
-    ? `Logged ${fmtSet(set)}  ·  last time (${when}): ${last.map(fmtSet).join(" ")}`
-    : `Logged ${set.exercise} ${fmtSet(set)}  ·  first time logged`;
+  st.gym.message = last.length ? `Logged ${fmtSet(set)}  ·  last time (${when}): ${last.map(fmtSet).join(" ")}` : `Logged ${set.exercise} ${fmtSet(set)}`;
   phone.showGym(st.gym.sets);
+}
+
+/**
+ * Testing only (npm run dev): ?gymseed loads sample history, and ?gymtest=a|b|c runs
+ * typed voice commands in order, so the gym flow can be checked in the simulator.
+ */
+async function gymDevTest() {
+  if (!import.meta.env.DEV) return;
+  const q = new URLSearchParams(location.search);
+  if (q.has("gymseed")) {
+    const day = (d: number, h: number, m: number) => { const t = new Date(); t.setDate(t.getDate() - d); t.setHours(h, m, 0, 0); return t.getTime(); };
+    const s = (d: number, m: number, exercise: string, weight: number, reps: number): LoggedSet => ({ t: day(d, 18, m), exercise, weight, unit: "lb", reps });
+    st.gym.sets = [
+      s(4, 0, "Pull Down", 130, 10), s(4, 3, "Pull Down", 130, 10), s(4, 8, "Squat", 225, 8), s(4, 12, "Squat", 225, 8),
+      s(3, 0, "Bench Press", 195, 5), s(3, 4, "Bench Press", 185, 8), s(3, 8, "Bench Press", 185, 7), s(3, 12, "Lateral Raise", 25, 12),
+    ];
+    await saveGym(bridge, st.gym.sets);
+  }
+  for (const text of (q.get("gymtest") ?? "").split("|").filter(Boolean)) {
+    const today = sessionSets(st);
+    const res = await api<{ text: string; command: GymCommand }>(st.settings, "/api/gym/command", {
+      method: "POST",
+      body: JSON.stringify({ text, today: today.map(({ exercise, weight, unit, reps }) => ({ exercise, weight, unit, reps })), known: knownExercises() }),
+    });
+    await runGymCommand(res.command, res.text, today);
+    await new Promise((r) => setTimeout(r, 50)); // distinct timestamps
+  }
+  const i = st.settings.cards.indexOf("gym");
+  if (q.has("gymtest") && i >= 0) current = i;
+  // ?asktest=q1|q2 asks typed questions in one chat (each keeps the earlier ones as context).
+  for (const text of (q.get("asktest") ?? "").split("|").filter(Boolean)) {
+    const res = await api<{ question: string; answer: string }>(st.settings, "/api/ask", {
+      method: "POST",
+      body: JSON.stringify({ text, history: st.ask.history, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+    });
+    st.ask = { ...st.ask, phase: "answer", question: res.question, lines: storyLines(res.answer), page: 0,
+      history: [...st.ask.history, { q: res.question, a: res.answer }].slice(-6) };
+    current = st.settings.cards.indexOf("ask");
+  }
+  await render(true);
 }
 
 // ---------- ask claude (voice) ----------
@@ -389,21 +521,7 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-/** Read an answer aloud through the phone (its speaker, or AirPods if connected). */
-function speak(text: string) {
-  if (!st.settings.speakAnswers || !("speechSynthesis" in window)) return;
-  try {
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.05;
-    speechSynthesis.speak(u);
-  } catch {
-    /* no voice available */
-  }
-}
-
 async function startAsk(followUp: boolean) {
-  if ("speechSynthesis" in window) speechSynthesis.cancel(); // stop reading the last answer
   if (!bridge) {
     st.ask = { ...st.ask, phase: "error", error: "Asking by voice works on the glasses." };
     return render(true);
@@ -456,9 +574,8 @@ async function stopAsk() {
         question: res.question,
         lines: storyLines(res.answer),
         page: 0,
-        history: [...st.ask.history, { q: res.question, a: res.answer }].slice(-3),
+        history: [...st.ask.history, { q: res.question, a: res.answer }].slice(-6),
       };
-      speak(res.answer);
     }
   } catch (e) {
     st.ask = { ...st.ask, phase: "error", error: e instanceof Error ? e.message : "Couldn't reach Claude." };
@@ -515,9 +632,14 @@ async function onTap() {
     if (a.phase === "listening") return stopAsk();
     if (a.phase === "thinking") return;
     if (a.phase === "answer" && a.page + 1 < askPages(st)) { a.page++; return render(); }
-    return startAsk(false);
+    return startAsk(a.history.length > 0); // keeps the conversation going; 2x starts fresh
   }
   if (id === "gym") {
+    const sum = st.gym.summary;
+    if (sum) {
+      if (sum.page + 1 < summaryPages(st)) { sum.page++; return render(); }
+      return closeSummary();
+    }
     if (st.gym.recording) return stopRecording();
     if (!st.gym.busy) return startRecording();
     return;
@@ -566,10 +688,11 @@ async function handle(g: Gesture) {
   if (g === "long") { await cancelAsk(); return goToSleep(); }
   // Leaving the Ask card while it listens cancels the question.
   if ((g === "next" || g === "prev") && card === "ask") await cancelAsk();
-  // Ask: double tap asks a follow-up to the last answer.
+  // Ask: double tap starts a new chat (forgets the conversation).
   if (g === "double" && card === "ask") {
-    if (st.ask.phase === "answer") return startAsk(true);
     if (st.ask.phase === "listening" || st.ask.phase === "thinking") return;
+    st.ask = { ...st.ask, phase: "ready", followUp: false, question: "", lines: [], page: 0, history: [], error: null };
+    return render(true);
   }
   // Day plan: double tap makes a new plan.
   if (g === "double" && card === "brief") return refreshBrief();
@@ -604,6 +727,7 @@ const phone = mountPhoneUI(st.settings, {
   async onGymUndo() {
     st.gym.sets = st.gym.sets.slice(0, -1);
     st.gym.restEndsAt = null;
+    st.gym.notice = null;
     st.gym.message = "Removed the last set.";
     await saveGym(bridge, st.gym.sets);
     phone.showGym(st.gym.sets);
@@ -655,6 +779,7 @@ async function boot() {
   }
 
   phone.showGym(st.gym.sets);
+  await gymDevTest();
   if (!st.settings.cards.length) st.settings.cards = ["agenda"];
   await render(true);
   refreshWeather();

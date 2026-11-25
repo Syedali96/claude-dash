@@ -23,15 +23,14 @@ export interface Settings {
   briefPrompt: string;
   tasks: string[];
   sleepSeconds: number; // blank the glasses after this long with no input (0 = never)
-  restSeconds: number; // base rest between sets; WHOOP recovery adds to it
+  rest: { heavy: number; compound: number; isolation: number }; // seconds by lift type; WHOOP recovery adds to it
   use24h: boolean;
   // Brightness levels 0-4 (4 = brightest) for each region of the screen.
   brightness: { header: number; body: number; footer: number };
   showHints: boolean; // gesture hints in the footer
-  speakAnswers: boolean; // read Ask Claude answers aloud on the phone (speaker or AirPods)
 }
 
-export const SETTINGS_VERSION = 10;
+export const SETTINGS_VERSION = 11;
 
 export const DAY_PLAN_PROMPT = "Suggest what I should focus on for the rest of today.";
 const V5_PROMPT =
@@ -46,11 +45,10 @@ export const DEFAULTS: Settings = {
   briefPrompt: DAY_PLAN_PROMPT,
   tasks: ["Reply to investor emails", "Review reel cuts", "Gym at 6pm"],
   sleepSeconds: 30,
-  restSeconds: 90,
+  rest: { heavy: 150, compound: 120, isolation: 60 },
   use24h: false,
   brightness: { header: 2, body: 4, footer: 1 },
   showHints: true,
-  speakAnswers: true,
 };
 
 const KEY = "claude-dash-settings";
@@ -65,7 +63,10 @@ export async function loadSettings(bridge: EvenAppBridge | null): Promise<Settin
   if (!raw) return structuredClone(DEFAULTS);
   try {
     const parsed = JSON.parse(raw) as Partial<Settings>;
-    const merged = { ...structuredClone(DEFAULTS), ...parsed, brightness: { ...DEFAULTS.brightness, ...parsed.brightness } };
+    const merged = { ...structuredClone(DEFAULTS), ...parsed, brightness: { ...DEFAULTS.brightness, ...parsed.brightness }, rest: { ...DEFAULTS.rest, ...parsed.rest } };
+    // v11 replaced one rest time with rest by lift type, and dropped read-aloud (the G2 has no speaker).
+    delete (merged as Partial<Settings> & { restSeconds?: number; speakAnswers?: boolean }).restSeconds;
+    delete (merged as Partial<Settings> & { restSeconds?: number; speakAnswers?: boolean }).speakAnswers;
     // v2 added the Agenda card: put it first for settings saved before then.
     if ((parsed.version ?? 1) < 2 && !merged.cards.includes("agenda")) merged.cards = ["agenda", ...merged.cards];
     // v3 added the Inbox card: put it right after Agenda.

@@ -1,5 +1,6 @@
 // Each card decides what the body shows. Taps are handled in main.ts.
 // Add a card: give it an id in settings.ts, then a renderer here.
+import { exerciseKey, type LiftType, liftType } from "./exercises";
 import type { CardId, LoggedSet, Settings } from "./settings";
 
 export interface AgendaEvent {
@@ -106,7 +107,11 @@ export interface DashState {
     busy: boolean;
     message: string | null;
     restEndsAt: number | null;
+    restLabel: string; // "heavy lift 2:30 + yellow day 0:30"
+    notice: string | null; // "REMOVED   Bench Press 185x8 (set 2)" shown in the status tile
     recovery: number | null; // WHOOP recovery %, once WHOOP is connected
+    sessionStart: number; // sets before this belong to an earlier (finished) workout
+    summary: { end: number; page: number } | null; // the workout-complete screen
   };
 }
 
@@ -410,12 +415,18 @@ export function briefPages(st: DashState): string[][] {
 
 // ---------- gym: status tile, then today's sets ----------
 
-/** Rest between sets: your base time, plus more when WHOOP says you're under-recovered. */
-export function restSeconds(st: DashState): number {
-  const base = st.settings.restSeconds;
+const TYPE_LABEL: Record<LiftType, string> = { heavy: "heavy lift", compound: "compound", isolation: "isolation" };
+const m_ss = (secs: number) => `${Math.floor(secs / 60)}:${pad(secs % 60)}`;
+
+/** Rest after a set: by lift type, plus more when WHOOP says you're under-recovered. */
+export function restFor(st: DashState, exercise: string): { seconds: number; label: string } {
+  const type = liftType(exercise);
+  const base = st.settings.rest[type];
   const r = st.gym.recovery;
-  if (r == null || r >= 67) return base;
-  return base + (r >= 34 ? 30 : 60);
+  const extra = r == null || r >= 67 ? 0 : r >= 34 ? 30 : 60;
+  const day = r == null || r >= 67 ? "" : r >= 34 ? "yellow day" : "red day";
+  const label = extra ? `${TYPE_LABEL[type]} ${m_ss(base)} + ${day} ${m_ss(extra)}` : TYPE_LABEL[type];
+  return { seconds: base + extra, label };
 }
 
 export const fmtSet = (s: { weight: number; unit: string; reps: number }) =>
@@ -423,30 +434,116 @@ export const fmtSet = (s: { weight: number; unit: string; reps: number }) =>
 
 function gymBody(st: DashState): Body {
   const g = st.gym;
+  if (g.summary) return summaryBody(st);
   const now = st.now.getTime();
   let status: string;
   let sub = "";
-  if (g.recording) { status = "● LISTENING"; sub = "Say it, then tap when done"; }
+  if (g.recording) { status = "● LISTENING"; sub = "Log a set, or say \"cancel that\""; }
   else if (g.busy) status = "Logging...";
-  else if (g.restEndsAt && g.restEndsAt > now) { status = `REST   ${mmss(g.restEndsAt - now)}`; sub = g.message ?? ""; }
+  else if (g.restEndsAt && g.restEndsAt > now) { status = `REST   ${mmss(g.restEndsAt - now)}   ·  ${g.restLabel}`; sub = g.message ?? ""; }
+  else if (g.notice) { status = g.notice; sub = g.message ?? ""; }
   else if (g.restEndsAt && now - g.restEndsAt < 5 * 60_000) { status = "GO  ·  next set"; sub = g.message ?? ""; }
   else { status = "READY"; sub = g.message ?? 'Tap, then say "bench, 185, 8 reps"'; }
 
-  const start = new Date(st.now);
-  start.setHours(0, 0, 0, 0);
-  const today = g.sets.filter((s) => s.t >= start.getTime());
-  // Group today's sets by exercise, most recent exercise first.
+  const today = sessionSets(st);
+  // Group this workout's sets by exercise, most recent exercise first.
   const groups = new Map<string, LoggedSet[]>();
-  for (const s of [...today].reverse()) groups.set(s.exercise, [...(groups.get(s.exercise) ?? []), s]);
-  const lines = [...groups].map(([ex, sets]) => {
+  for (const s of [...today].reverse()) {
+    const k = exerciseKey(s.exercise);
+    groups.set(k, [...(groups.get(k) ?? []), s]);
+  }
+  const lines = [...groups.values()].map((sets) => {
     const unit = sets[0].weight ? ` (${sets[0].unit})` : "";
-    return `${ex}${unit}   ${sets.reverse().map(fmtSet).join("  ")}`;
+    return `${sets[0].exercise}${unit}   ${sets.reverse().map(fmtSet).join("  ")}`;
   });
 
   return {
     tiles: [
       box(8, 2, 560, 68, [status, sub]),
       box(0, 78, 576, 122, lines.length ? lines : ["No sets yet today."], { border: false, capture: true }),
+    ],
+  };
+}
+
+/** This workout's sets: today, after the last "workout complete". */
+export function sessionSets(st: DashState, end = Infinity): LoggedSet[] {
+  const start = Math.max(new Date(st.now).setHours(0, 0, 0, 0), st.gym.sessionStart);
+  return st.gym.sets.filter((s) => s.t >= start && s.t <= end);
+}
+
+// ---------- workout complete ----------
+
+const LB_PER_KG = 2.2046;
+const lb = (s: LoggedSet) => (s.unit === "kg" ? s.weight * LB_PER_KG : s.weight);
+/** Strength of a set (estimated 1-rep max); bodyweight sets count reps. */
+const score = (s: LoggedSet) => (s.weight ? lb(s) * (1 + s.reps / 30) : s.reps);
+const volume = (sets: LoggedSet[]) => sets.reduce((n, s) => n + lb(s) * s.reps, 0);
+const best = (sets: LoggedSet[]) => sets.reduce((a, b) => (score(b) > score(a) ? b : a));
+const dayOf = (t: number) => new Date(t).toDateString();
+
+export interface WorkoutSummary {
+  volume: number; // lb
+  change: number | null; // % vs the last workout
+  prs: number;
+  sets: number;
+  lines: string[]; // "◆ Bench Press 205x5   was 195x5"
+}
+
+export function workoutSummary(st: DashState): WorkoutSummary | null {
+  const end = st.gym.summary?.end ?? Date.now();
+  const session = sessionSets(st, end);
+  if (!session.length) return null;
+  const startT = session[0].t;
+  const before = st.gym.sets.filter((s) => s.t < startT);
+  // The last workout: the most recent earlier day you trained.
+  const lastDay = before.length ? dayOf(before[before.length - 1].t) : null;
+  const lastWorkout = lastDay ? before.filter((s) => dayOf(s.t) === lastDay) : [];
+  const vol = volume(session);
+  const lastVol = volume(lastWorkout);
+
+  const byKey = new Map<string, LoggedSet[]>();
+  for (const s of session) byKey.set(exerciseKey(s.exercise), [...(byKey.get(exerciseKey(s.exercise)) ?? []), s]);
+  let prs = 0;
+  const rows: { line: string; rank: number }[] = [];
+  for (const [key, sets] of byKey) {
+    const top = best(sets);
+    const prior = before.filter((s) => exerciseKey(s.exercise) === key);
+    const name = `${top.exercise} ${fmtSet(top)}`;
+    if (!prior.length) { rows.push({ line: `   ${name}`, rank: 2 }); continue; }
+    if (score(top) > Math.max(...prior.map(score))) prs++;
+    const pDay = dayOf(prior[prior.length - 1].t);
+    const last = best(prior.filter((s) => dayOf(s.t) === pDay));
+    const diff = score(top) - score(last);
+    if (Math.abs(diff) < 0.01) rows.push({ line: `   ${name}   same as last time`, rank: 1 });
+    else rows.push({ line: `${diff > 0 ? "◆ " : "   "}${name}   was ${fmtSet(last)}`, rank: diff > 0 ? 0 : 1 });
+  }
+  rows.sort((a, b) => a.rank - b.rank);
+  return {
+    volume: Math.round(vol),
+    change: lastVol > 0 ? Math.round(((vol - lastVol) / lastVol) * 100) : null,
+    prs,
+    sets: session.length,
+    lines: rows.map((r) => r.line),
+  };
+}
+
+const SUMMARY_ROWS = 3;
+export function summaryPages(st: DashState): number {
+  return Math.max(1, Math.ceil((workoutSummary(st)?.lines.length ?? 0) / SUMMARY_ROWS));
+}
+
+function summaryBody(st: DashState): Body {
+  const w = workoutSummary(st);
+  if (!w) return message("No sets logged in this workout.\n\nTap to close.");
+  const page = Math.min(st.gym.summary?.page ?? 0, summaryPages(st) - 1);
+  const strain = st.whoop?.strain;
+  const change = w.change == null ? "" : `${w.change >= 0 ? "+" : ""}${w.change}% vs last`;
+  return {
+    tiles: [
+      box(8, 2, 180, 96, ["VOLUME", `${w.volume.toLocaleString("en-US")} lb`, change]),
+      box(198, 2, 180, 96, ["PRs", `${w.prs} new`, `${w.sets} sets`]),
+      box(388, 2, 180, 96, ["STRAIN", strain != null ? strain.toFixed(1) : "--", "WHOOP so far"]),
+      box(8, 104, 560, 98, w.lines.slice(page * SUMMARY_ROWS, (page + 1) * SUMMARY_ROWS), { capture: true }),
     ],
   };
 }
@@ -480,10 +577,10 @@ function askBody(st: DashState): Body {
       return { tiles: [q(a.question), box(ANSWER.x, ANSWER.y, ANSWER.w, ANSWER.h, p[Math.min(a.page, p.length - 1)], { border: false, capture: true })] };
     }
     case "error":
-      return message(`${a.error ?? "Something went wrong."}\n\nTap to try again.`);
+      return message(`${a.error ?? "Something went wrong."}\n\nTap to try again${a.history.length ? ", double tap for a new chat" : ""}.`);
     default:
       return {
-        tiles: [full(["READY", "Tap and ask anything, like:", "", '"What did Paul say about the 11/26 post?"',
+        tiles: [full(["NEW CHAT", "Tap and ask anything, like:", "", '"What did Paul say about the 11/26 post?"',
           '"When is my next meeting with Brandon?"', '"Summarize what Apple Support wants."'])],
       };
   }
@@ -517,14 +614,25 @@ export const CARDS: Record<CardId, CardDef> = {
   },
   gym: {
     title: (st) => {
-      const n = st.gym.sets.filter((s) => s.t >= new Date(st.now).setHours(0, 0, 0, 0)).length;
+      if (st.gym.summary) return `WORKOUT COMPLETE  ·  ${shortDate(st.now)}`;
+      const n = sessionSets(st).length;
       return `GYM${n ? `  ·  ${n} set${n === 1 ? "" : "s"} today` : ""}`;
     },
-    tapHint: (st) => (st.gym.recording ? "tap  done" : "tap  log a set"),
+    tapHint: (st) => {
+      if (st.gym.summary) {
+        const n = summaryPages(st);
+        const p = Math.min(st.gym.summary.page, n - 1);
+        return `${n > 1 ? `${p + 1}/${n}   ` : ""}tap  ${p + 1 < n ? "more" : "close"}`;
+      }
+      return st.gym.recording ? "tap  done" : "tap  log or edit";
+    },
     body: gymBody,
   },
   ask: {
-    title: () => "ASK CLAUDE",
+    title: (st) => {
+      const n = st.ask.history.length;
+      return n ? `ASK CLAUDE  ·  chat · ${n} question${n === 1 ? "" : "s"}` : "ASK CLAUDE  ·  new chat";
+    },
     tapHint: (st) => {
       const a = st.ask;
       if (a.phase === "listening") return "tap  done";
@@ -532,9 +640,9 @@ export const CARDS: Record<CardId, CardDef> = {
       if (a.phase === "answer") {
         const n = askPages(st);
         const more = a.page + 1 < n;
-        return `${n > 1 ? `${a.page + 1}/${n}   ` : ""}tap  ${more ? "more" : "ask again"}   2x  follow-up`;
+        return `${n > 1 ? `${a.page + 1}/${n}   ` : ""}tap  ${more ? "more" : "follow-up"}   2x  new chat`;
       }
-      return "tap  ask";
+      return a.history.length ? "tap  follow-up   2x  new chat" : "tap  ask";
     },
     body: askBody,
   },

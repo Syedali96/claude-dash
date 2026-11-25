@@ -14,7 +14,8 @@ function devVar(name: string): string {
 const devToken = () => devVar("APP_TOKEN");
 
 // Use the deployed server when there is one (real data); otherwise `npm run server`.
-const target = devVar("SERVER_URL") || "http://127.0.0.1:8787";
+// LOCAL_API=1 npm run dev forces the local server, to test Worker changes before deploying.
+const target = (!process.env.LOCAL_API && devVar("SERVER_URL")) || "http://127.0.0.1:8787";
 const withToken: ProxyOptions = {
   target,
   changeOrigin: true,

@@ -3,7 +3,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ask } from "./ask";
 import { alerts, inbox } from "./gmail";
-import { parseSet } from "./gym";
+import { gymCommand, parseSet } from "./gym";
 import { article, markets, news } from "./news";
 import { bedtime, finishWhoop, startWhoop, whoopConnected, whoopText, whoopTip, whoopToday } from "./whoop";
 import { ACCOUNTS, type AccountKey, agenda, finishAuth, isConnected, startAuth } from "./google";
@@ -109,6 +109,9 @@ export default {
         case "/api/gym/parse":
           if (req.method !== "POST") return json({ error: "POST only" }, 405);
           return json(await parseSet(req, env));
+        case "/api/gym/command":
+          if (req.method !== "POST") return json({ error: "POST only" }, 405);
+          return json(await gymCommand(req, env));
         case "/api/brief":
           return brief(req, env);
         default:
