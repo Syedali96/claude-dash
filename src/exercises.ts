@@ -89,3 +89,30 @@ export function liftType(name: string): LiftType {
   if (ISOLATION_WORDS.test(normalize(known ?? name))) return "isolation";
   return "compound";
 }
+
+// ---------- what to do next set (double progression) ----------
+
+/** Rep range per lift type: add reps until the top, then add weight and drop to the bottom. */
+const RANGE: Record<LiftType, [number, number]> = { heavy: [5, 8], compound: [8, 12], isolation: [10, 15] };
+const BIG_LOWER = new Set(["Squat", "Front Squat", "Deadlift", "Romanian Deadlift", "Leg Press", "Hip Thrust"]);
+
+interface SetLike { exercise: string; weight: number; unit: "lb" | "kg"; reps: number }
+const strength = (s: SetLike) => (s.weight ? s.weight * (s.unit === "kg" ? 2.2046 : 1) * (1 + s.reps / 30) : s.reps);
+
+/**
+ * A short tip for the next set, e.g. "next: 145x8 (add 5 lb)" or "next: 140x11 (1 more rep)".
+ * Starts from whichever is stronger: this set, or your best set last time.
+ */
+export function nextTip(set: SetLike, lastTime: SetLike[]): string {
+  const best = lastTime.reduce<SetLike | null>((a, b) => (!a || strength(b) > strength(a) ? b : a), null);
+  const fromLast = !!best && best.unit === set.unit && strength(best) > strength(set);
+  const base = fromLast ? best! : set;
+  const why = (s: string) => (fromLast ? "beat last time" : s);
+  if (!base.weight) return `next: ${base.reps + 1} reps (${why("1 more rep")})`;
+  const [low, top] = RANGE[liftType(base.exercise)];
+  if (base.reps >= top) {
+    const step = set.unit === "kg" ? (BIG_LOWER.has(knownName(base.exercise) ?? "") ? 5 : 2.5) : BIG_LOWER.has(knownName(base.exercise) ?? "") ? 10 : 5;
+    return `next: ${base.weight + step}x${low} (${why(`add ${step} ${set.unit}`)})`;
+  }
+  return `next: ${base.weight}x${base.reps + 1} (${why("1 more rep")})`;
+}

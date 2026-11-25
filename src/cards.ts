@@ -486,7 +486,8 @@ export interface WorkoutSummary {
   change: number | null; // % vs the last workout
   prs: number;
   sets: number;
-  lines: string[]; // "◆ Bench Press 205x5   was 195x5"
+  up: { line: string; gain: number }[]; // beat last time: "◆ Bench Press 205x5  (was 185x8)"
+  rest: { name: string; line: string; kind: "same" | "lower" | "new" }[];
 }
 
 export function workoutSummary(st: DashState): WorkoutSummary | null {
@@ -504,46 +505,63 @@ export function workoutSummary(st: DashState): WorkoutSummary | null {
   const byKey = new Map<string, LoggedSet[]>();
   for (const s of session) byKey.set(exerciseKey(s.exercise), [...(byKey.get(exerciseKey(s.exercise)) ?? []), s]);
   let prs = 0;
-  const rows: { line: string; rank: number }[] = [];
+  const up: WorkoutSummary["up"] = [];
+  const rest: WorkoutSummary["rest"] = [];
   for (const [key, sets] of byKey) {
     const top = best(sets);
     const prior = before.filter((s) => exerciseKey(s.exercise) === key);
     const name = `${top.exercise} ${fmtSet(top)}`;
-    if (!prior.length) { rows.push({ line: `   ${name}`, rank: 2 }); continue; }
+    if (!prior.length) { rest.push({ name: top.exercise, line: `   ${name}  (new)`, kind: "new" }); continue; }
     if (score(top) > Math.max(...prior.map(score))) prs++;
     const pDay = dayOf(prior[prior.length - 1].t);
     const last = best(prior.filter((s) => dayOf(s.t) === pDay));
     const diff = score(top) - score(last);
-    if (Math.abs(diff) < 0.01) rows.push({ line: `   ${name}   same as last time`, rank: 1 });
-    else rows.push({ line: `${diff > 0 ? "◆ " : "   "}${name}   was ${fmtSet(last)}`, rank: diff > 0 ? 0 : 1 });
+    if (diff > 0.01) up.push({ line: `◆ ${name}  (was ${fmtSet(last)})`, gain: diff / score(last) });
+    else if (Math.abs(diff) < 0.01) rest.push({ name: top.exercise, line: `   ${name}  (same)`, kind: "same" });
+    else rest.push({ name: top.exercise, line: `   ${name}  (was ${fmtSet(last)})`, kind: "lower" });
   }
-  rows.sort((a, b) => a.rank - b.rank);
+  up.sort((a, b) => b.gain - a.gain);
   return {
     volume: Math.round(vol),
     change: lastVol > 0 ? Math.round(((vol - lastVol) / lastVol) * 100) : null,
     prs,
     sets: session.length,
-    lines: rows.map((r) => r.line),
+    up,
+    rest,
   };
 }
 
-const SUMMARY_ROWS = 3;
-export function summaryPages(st: DashState): number {
-  return Math.max(1, Math.ceil((workoutSummary(st)?.lines.length ?? 0) / SUMMARY_ROWS));
+const SUMMARY_ROWS = 4;
+
+/** Everything on one page: lifts that went up get a line each; the rest share one line. */
+function summaryLines(w: WorkoutSummary): string[] {
+  const all = [...w.up.map((u) => u.line), ...w.rest.map((r) => r.line)];
+  if (all.length <= SUMMARY_ROWS) return all;
+  const ups = w.up.slice(0, SUMMARY_ROWS - 1).map((u) => u.line);
+  const extraUp = w.up.length - ups.length;
+  const group = (kind: string, label: string) => {
+    const names = w.rest.filter((r) => r.kind === kind).map((r) => r.name);
+    return names.length ? `${label}: ${names.join(", ")}` : "";
+  };
+  const parts = [extraUp ? `+${extraUp} more up` : "", group("same", "Same"), group("lower", "Lower"), group("new", "New")].filter(Boolean);
+  return [...ups, ...wrap(parts.join("  ·  "), COLS).slice(0, SUMMARY_ROWS - ups.length)];
+}
+
+export function summaryPages(_st: DashState): number {
+  return 1;
 }
 
 function summaryBody(st: DashState): Body {
   const w = workoutSummary(st);
   if (!w) return message("No sets logged in this workout.\n\nTap to close.");
-  const page = Math.min(st.gym.summary?.page ?? 0, summaryPages(st) - 1);
   const strain = st.whoop?.strain;
   const change = w.change == null ? "" : `${w.change >= 0 ? "+" : ""}${w.change}% vs last`;
   return {
     tiles: [
-      box(8, 2, 180, 96, ["VOLUME", `${w.volume.toLocaleString("en-US")} lb`, change]),
-      box(198, 2, 180, 96, ["PRs", `${w.prs} new`, `${w.sets} sets`]),
-      box(388, 2, 180, 96, ["STRAIN", strain != null ? strain.toFixed(1) : "--", "WHOOP so far"]),
-      box(8, 104, 560, 98, w.lines.slice(page * SUMMARY_ROWS, (page + 1) * SUMMARY_ROWS), { capture: true }),
+      box(8, 2, 180, 68, [`VOLUME  ${w.volume.toLocaleString("en-US")} lb`, change]),
+      box(198, 2, 180, 68, [`PRs  ${w.prs} new`, `${w.sets} sets`]),
+      box(388, 2, 180, 68, [`STRAIN  ${strain != null ? strain.toFixed(1) : "--"}`, "WHOOP so far"]),
+      box(8, 76, 560, 124, summaryLines(w), { capture: true }),
     ],
   };
 }

@@ -10,7 +10,7 @@ import {
 import { ApiError, api } from "./api";
 import { alertFrame, alertPages, askPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
 import { drawBlank, drawFrame, type Frame, MENU, shapeChanged, updateRegion, updateTile } from "./layout";
-import { canonicalName, exerciseKey } from "./exercises";
+import { canonicalName, exerciseKey, nextTip } from "./exercises";
 import { mountPhoneUI } from "./phone";
 import { type LoggedSet, loadGym, loadSettings, saveGym, saveSettings } from "./settings";
 
@@ -465,8 +465,8 @@ async function logSet(heard: Omit<LoggedSet, "t">) {
   st.gym.restLabel = rest.label;
   const lastDay = before.length ? new Date(before[before.length - 1].t).toDateString() : null;
   const last = lastDay ? before.filter((x) => new Date(x.t).toDateString() === lastDay) : [];
-  const when = lastDay ? new Date(lastDay).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
-  st.gym.message = last.length ? `Logged ${fmtSet(set)}  ·  last time (${when}): ${last.map(fmtSet).join(" ")}` : `Logged ${set.exercise} ${fmtSet(set)}`;
+  // Instead of last time's numbers, say what to aim for next.
+  st.gym.message = `Logged ${fmtSet(set)}  ·  ${nextTip(set, last)}`;
   phone.showGym(st.gym.sets);
 }
 
