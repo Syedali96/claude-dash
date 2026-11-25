@@ -112,6 +112,7 @@ export type GymCommand =
   | { action: "delete"; target: number } // 1-based position in today's list
   | { action: "edit"; target: number; weight: number | null; reps: number | null; exercise: string | null }
   | { action: "finish" }
+  | { action: "query"; exercise: string } // "what was my last bench?"
   | { action: "none" };
 
 interface CommandRequest {
@@ -123,14 +124,15 @@ interface CommandRequest {
 
 const FINISH = /\b(workout(?:'s| is)? (?:complete|done|finished|over)|(?:i'?m|i am) (?:all )?done|end(?:ing)? (?:the |my )?workout|finish(?:ed)? (?:the |my )?workout|that'?s (?:it|a wrap)(?: for (?:today|the day))?|done for (?:today|the day)|wrap (?:it )?up|session (?:complete|done|over))\b/;
 const UNDO = /^(?:undo(?: that| it)?|cancel(?: that| it| the last(?: set)?)?|scratch that|delete (?:that|it|the last(?: set)?)|remove (?:that|it|the last(?: set)?)|never ?mind|take that back|oops|that was wrong)$/;
+const QUESTION = /^(what|whats|what's|how|when|which|should|where)\b|\b(last time|what did i|should i start|remind me)\b|\?$/;
 const EDIT_WORDS = /\b(cancel|delete|remove|undo|scratch|change|fix|make (?:that|it)|actually|instead|wrong|should be|update|edit|correct)\b/;
 
 const COMMAND_SCHEMA = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["log", "undo", "delete", "edit", "finish", "none"] },
+    action: { type: "string", enum: ["log", "undo", "delete", "edit", "finish", "query", "none"] },
     target: { type: "integer", description: "For delete/edit: the number of the set in today's list. 0 otherwise." },
-    exercise: { type: "string", description: "For log: the exercise. For edit: a new exercise name, or empty to keep it." },
+    exercise: { type: "string", description: "For log/query: the exercise. For edit: a new exercise name, or empty to keep it." },
     weight: { type: "number", description: "For log/edit: the weight, 0 for bodyweight. -1 on edit to keep it." },
     unit: { type: "string", enum: ["lb", "kg"] },
     reps: { type: "integer", description: "For log/edit: reps. -1 on edit to keep it." },
@@ -155,6 +157,7 @@ async function claudeCommand(env: Env, text: string, today: GymSet[], known: str
       "- delete: remove a specific earlier set (\"delete my second bench set\"). Set target to its number in today's list.\n" +
       "- edit: fix a set (\"that was 10 reps\", \"change my last squat to 225\"). Target its number; -1 for fields that stay the same; exercise empty unless renamed.\n" +
       "- finish: the workout is over.\n" +
+      "- query: a question about an exercise's history or where to start (\"what was my last bench?\", \"what should I start squats at?\"). Set exercise, using the known name when it's the same lift.\n" +
       "- none: anything else.\n" +
       "\"Last\" or \"that\" means the most recent matching set.",
     messages: [{ role: "user", content: `Today's sets:\n${list}\n\nKnown exercise names: ${known.join(", ") || "(none)"}\n\nThey said: "${text}"` }],
@@ -181,6 +184,8 @@ async function claudeCommand(env: Env, text: string, today: GymSet[], known: str
         reps: o.reps > 0 ? o.reps : null,
         exercise: o.exercise ? canonicalName(o.exercise, known) : null,
       };
+    case "query":
+      return o.exercise ? { action: "query", exercise: canonicalName(o.exercise, known) } : { action: "none" };
     default:
       return { action: o.action === "finish" ? "finish" : "none" };
   }
@@ -221,10 +226,10 @@ export async function gymCommand(req: Request, env: Env): Promise<{ text: string
   }
   if (!text) return { text, command: { action: "none" } };
 
-  const t = text.toLowerCase().replace(/[,.!?]/g, " ").replace(/\s+/g, " ").trim();
+  const t = text.toLowerCase().replace(/[,.!]/g, " ").replace(/\s+/g, " ").trim();
   if (FINISH.test(t)) return { text, command: { action: "finish" } };
-  if (UNDO.test(t)) return { text, command: today.length ? { action: "undo" } : { action: "none" } };
-  if (!EDIT_WORDS.test(t)) {
+  if (UNDO.test(t.replace(/\?/g, "").trim())) return { text, command: today.length ? { action: "undo" } : { action: "none" } };
+  if (!EDIT_WORDS.test(t) && !QUESTION.test(t)) {
     const set = quickParse(text);
     if (set) {
       let exercise = canonicalName(set.exercise, known);

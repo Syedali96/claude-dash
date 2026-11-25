@@ -375,6 +375,7 @@ type GymCommand =
   | { action: "delete"; target: number }
   | { action: "edit"; target: number; weight: number | null; reps: number | null; exercise: string | null }
   | { action: "finish" }
+  | { action: "query"; exercise: string }
   | { action: "none" };
 
 /** Every exercise name you've logged, most recent first (so the server reuses your names). */
@@ -433,8 +434,34 @@ async function runGymCommand(cmd: GymCommand, heard: string, today: LoggedSet[])
     }
     case "finish":
       return finishWorkout();
+    case "query":
+      return answerQuery(cmd.exercise);
   }
   st.gym.message = heard ? `Heard "${heard.slice(0, 28)}". Try again.` : "Didn't catch that. Tap to retry.";
+}
+
+/** "What was my last bench?": your last session for that lift, and where to start today. */
+function answerQuery(name: string) {
+  const key = exerciseKey(name);
+  const all = st.gym.sets.filter((x) => exerciseKey(x.exercise) === key);
+  const todayStr = new Date().toDateString();
+  const earlier = all.filter((x) => new Date(x.t).toDateString() !== todayStr);
+  const pool = earlier.length ? earlier : all;
+  if (!pool.length) {
+    st.gym.notice = `NO ${name.toUpperCase()} HISTORY YET`;
+    st.gym.message = "Log a set and it'll be here next time";
+    return;
+  }
+  const day = new Date(pool[pool.length - 1].t).toDateString();
+  const last = pool.filter((x) => new Date(x.t).toDateString() === day);
+  // Start from your heaviest set last time (most reps at that weight).
+  const top = last.reduce((a, b) => (b.weight > a.weight || (b.weight === a.weight && b.reps > a.reps) ? b : a));
+  const when = new Date(day).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const unit = top.weight ? ` ${top.unit}` : "";
+  const start = nextTip(top, []).replace(/^next:/, "start at");
+  st.gym.notice = `LAST ${last[0].exercise.toUpperCase()}  ·  ${when}`;
+  st.gym.message = `${last.map(fmtSet).join("  ")}${unit}  ·  ${start}`;
+  if (st.gym.restEndsAt && st.gym.restEndsAt > Date.now()) st.gym.message = `Last ${last[0].exercise} (${when}): ${last.map(fmtSet).join(" ")}  ·  ${start}`;
 }
 
 /** "Workout complete": stop the timer and show the summary. */

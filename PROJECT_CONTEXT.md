@@ -84,7 +84,7 @@ Glasses (G2) ⇄ Even app WebView (phone) runs the Claude Dash web app (Vite + T
 | `POST /api/brief` | Day plan: REMINDERS (exact list) + TODAY'S FOCUS (Claude bullets) |
 | `GET/POST /api/reminders` | Reminders from the iOS Shortcut, accepting `{items: text or array}` |
 | `POST /api/gym/parse` | Raw 16 kHz PCM in, `{text, set:{exercise,weight,unit,reps}}` out |
-| `POST /api/gym/command` | `{audio(base64 PCM) or text, today[], known[]}` in, `{text, command}` out. Command is log / undo / delete / edit / finish / none |
+| `POST /api/gym/command` | `{audio(base64 PCM) or text, today[], known[]}` in, `{text, command}` out. Command is log / undo / delete / edit / finish / query / none |
 | `POST /api/ask` | `{audio(base64 PCM) or text, history, now, timeZone}` in, `{question, answer}` out |
 
 ## 4. The glasses app today (v0.8.0)
@@ -210,7 +210,7 @@ npx wrangler kv key delete --binding TOKENS --remote "<key>"   # clear a cache (
 - 0.6.0: **Tiles design**.
 - 0.7.0: Ask Claude, hold = display off, double tap on Day plan = new plan, inbox names.
 - 0.8.0: inbox "Name: reason", Ask web search + read aloud, gym last-time numbers, day plan refreshes every 2 hours.
-- 0.9.0 (built Nov 24, not shipped yet): gym voice edits ("cancel that", "delete my second bench set", "that was 10 reps"), exercise name merging (`src/exercises.ts`), rest by lift type (heavy 2:30 / compound 2:00 / isolation 1:00, +0:30 yellow, +1:00 red), "workout complete" summary (volume vs last, PRs, sets, WHOOP strain, best set per exercise vs last time), no "first time" text; after each set a "next: 145x8 (add 5 lb)" tip (double progression: heavy 5-8, compound 8-12, isolation 10-15 reps; +10 lb big lower-body lifts, +5 lb others); summary fits one page (lifts that went up, then "Same / Lower / New" names). Ask: read-aloud removed, tap on last page = follow-up with context (last 6 kept), double tap = new chat. Settings v11.
+- 0.9.0 (built Nov 24, not shipped yet): gym voice edits ("cancel that", "delete my second bench set", "that was 10 reps"), exercise name merging (`src/exercises.ts`), rest by lift type (heavy 2:30 / compound 2:00 / isolation 1:00, +0:30 yellow, +1:00 red), "workout complete" summary (volume vs last, PRs, sets, WHOOP strain, best set per exercise vs last time), no "first time" text; after each set a "next: 145x8 (add 5 lb)" tip (double progression: heavy 5-8, compound 8-12, isolation 10-15 reps; +10 lb big lower-body lifts, +5 lb others); summary fits one page (◆ lifts that beat last time, then "Matched last time / Below last time / No history yet" groups). The logger also answers questions ("what was my last bench?") with last session's sets and a "start at" weight. Ask: read-aloud removed, tap on last page = follow-up with context (last 6 kept), double tap = new chat. Settings v11.
 - Testing hooks (dev only): `LOCAL_API=1 npm run dev` uses the local Worker; `?gymseed` loads sample history, `?gymtest=a|b` runs typed gym commands, `?asktest=q1|q2` asks typed questions in one chat.
 
 ## 7. Known limits and gotchas

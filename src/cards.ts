@@ -511,14 +511,14 @@ export function workoutSummary(st: DashState): WorkoutSummary | null {
     const top = best(sets);
     const prior = before.filter((s) => exerciseKey(s.exercise) === key);
     const name = `${top.exercise} ${fmtSet(top)}`;
-    if (!prior.length) { rest.push({ name: top.exercise, line: `   ${name}  (new)`, kind: "new" }); continue; }
+    if (!prior.length) { rest.push({ name: top.exercise, line: `   ${name}  (no history yet)`, kind: "new" }); continue; }
     if (score(top) > Math.max(...prior.map(score))) prs++;
     const pDay = dayOf(prior[prior.length - 1].t);
     const last = best(prior.filter((s) => dayOf(s.t) === pDay));
     const diff = score(top) - score(last);
-    if (diff > 0.01) up.push({ line: `◆ ${name}  (was ${fmtSet(last)})`, gain: diff / score(last) });
-    else if (Math.abs(diff) < 0.01) rest.push({ name: top.exercise, line: `   ${name}  (same)`, kind: "same" });
-    else rest.push({ name: top.exercise, line: `   ${name}  (was ${fmtSet(last)})`, kind: "lower" });
+    if (diff > 0.01) up.push({ line: `◆ ${name}  (last time ${fmtSet(last)})`, gain: diff / score(last) });
+    else if (Math.abs(diff) < 0.01) rest.push({ name: top.exercise, line: `   ${name}  (same as last time)`, kind: "same" });
+    else rest.push({ name: top.exercise, line: `   ${name}  (below last time: ${fmtSet(last)})`, kind: "lower" });
   }
   up.sort((a, b) => b.gain - a.gain);
   return {
@@ -543,8 +543,22 @@ function summaryLines(w: WorkoutSummary): string[] {
     const names = w.rest.filter((r) => r.kind === kind).map((r) => r.name);
     return names.length ? `${label}: ${names.join(", ")}` : "";
   };
-  const parts = [extraUp ? `+${extraUp} more up` : "", group("same", "Same"), group("lower", "Lower"), group("new", "New")].filter(Boolean);
-  return [...ups, ...wrap(parts.join("  ·  "), COLS).slice(0, SUMMARY_ROWS - ups.length)];
+  const parts = [extraUp ? `+${extraUp} more beat last time` : "", group("same", "Matched last time"), group("lower", "Below last time"),
+    group("new", "No history yet")].filter(Boolean);
+  const room = SUMMARY_ROWS - ups.length;
+  // One group per line when there's room; otherwise share lines.
+  let tail = parts.map((p) => trim(p, COLS));
+  if (tail.length > room) {
+    // Pack groups onto shared lines, never starting a line with the separator.
+    const packed: string[] = [];
+    for (const p of tail) {
+      const cur = packed[packed.length - 1];
+      if (cur && (cur + "  ·  " + p).length <= COLS) packed[packed.length - 1] = cur + "  ·  " + p;
+      else packed.push(p);
+    }
+    tail = packed.slice(0, room);
+  }
+  return [...ups, ...tail];
 }
 
 export function summaryPages(_st: DashState): number {
