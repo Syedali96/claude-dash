@@ -1,0 +1,39 @@
+import { readFileSync } from "node:fs";
+import { defineConfig, type ProxyOptions } from "vite";
+
+// While testing (npm run dev), calls to /api, /setup and /auth go to the local
+// server (npm run server) and get your access token added here, so the phone
+// page needs no token. Deployed builds call your Worker URL directly instead.
+function devVar(name: string): string {
+  try {
+    return new RegExp(`^${name}=(.*)$`, "m").exec(readFileSync(".dev.vars", "utf8"))?.[1]?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+const devToken = () => devVar("APP_TOKEN");
+
+// Use the deployed server when there is one (real data); otherwise `npm run server`.
+const target = devVar("SERVER_URL") || "http://127.0.0.1:8787";
+const withToken: ProxyOptions = {
+  target,
+  changeOrigin: true,
+  configure: (proxy) =>
+    proxy.on("proxyReq", (req) => req.setHeader("Authorization", `Bearer ${devToken()}`)),
+};
+
+export default defineConfig(({ command }) => ({
+  // Packaged builds (npm run pack) talk to your deployed server directly, so the
+  // address and token are built in; settings on the phone can still override them.
+  define: {
+    __BUILD_SERVER__: JSON.stringify(command === "build" ? devVar("SERVER_URL") : ""),
+    // Never baked into the package (it's uploaded to Even Hub). Paste it once in the phone settings.
+    __BUILD_TOKEN__: JSON.stringify(""),
+  },
+  server: {
+    port: 5173,
+    strictPort: true,
+    proxy: { "/api": withToken, "/setup": withToken, "/auth": withToken },
+  },
+  build: { target: "es2022" },
+}));

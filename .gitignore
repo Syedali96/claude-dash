@@ -1,0 +1,14 @@
+node_modules
+dist
+*.ehpk
+.wrangler
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+!.env.example
+*secret*.json
+*credentials*.json
+*.pem
+*.key
+.DS_Store

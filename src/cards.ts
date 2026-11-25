@@ -1,0 +1,571 @@
+// Each card decides what the body shows. Taps are handled in main.ts.
+// Add a card: give it an id in settings.ts, then a renderer here.
+import type { CardId, LoggedSet, Settings } from "./settings";
+
+export interface AgendaEvent {
+  title: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  series: boolean;
+  location?: string;
+  video: boolean;
+}
+
+export interface InboxItem {
+  line: string; // "Paul: content review, 11/26"
+  tag: string; // which inbox: ech, hel, asy, gml
+  ageHours: number;
+}
+
+export interface InboxData {
+  at: string;
+  reply: InboxItem[];
+  followup: InboxItem[];
+  skipped: string[];
+  advice: string; // "Reply to Paul first, then ..."
+}
+
+export interface WhoopToday {
+  recovery: number | null;
+  hrv: number | null;
+  restingHr: number | null;
+  recovery7d: number | null;
+  sleepPerformance: number | null;
+  sleepHours: number | null;
+  sleepNeedHours: number | null;
+  strain: number | null;
+  workouts: string[];
+  tip?: string; // one sentence: what to do today to raise recovery
+  bedtime?: string; // "10:50 PM", from sleep need + alarm
+}
+
+export interface EmailAlert {
+  id: string;
+  tag: string;
+  from: string;
+  subject: string;
+  line: string;
+  summary: string;
+  at: number;
+}
+
+export interface Markets { sp500: number | null; btc: number | null; btcChange: number | null }
+
+/** One box of text on the glasses. x/y are relative to the body area (576 x 202). */
+export interface Tile {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+  border?: boolean; // rounded outline
+  dim?: boolean; // dimmer text (labels, times)
+  capture?: boolean; // receives gestures (default: the biggest tile)
+}
+
+/** A card body is a few tiles. */
+export interface Body { tiles: Tile[] }
+
+export interface Reader {
+  title: string;
+  lines: string[];
+  page: number;
+  loading: boolean;
+  error: string | null;
+}
+
+export interface DashState {
+  settings: Settings;
+  now: Date;
+  weather: string | null; // "56°F · clear" (used by the day plan)
+  brief: { text: string; at: Date | null; loading: boolean; error: string | null };
+  briefPage: number;
+  agenda: { events: AgendaEvent[] | null; loading: boolean; error: string | null; notConnected: boolean };
+  agendaPage: number; // 0 schedule, 1 WHOOP + inbox
+  news: string[] | null; // up to 10 headlines
+  markets: Markets | null;
+  alerts: EmailAlert[]; // new emails you haven't opened yet
+  alertView: { list: EmailAlert[]; index: number; expanded: boolean; page: number; closeAt: number | null } | null;
+  newsCursor: number;
+  reader: Reader | null; // an open news story
+  inbox: { data: InboxData | null; loading: boolean; error: string | null; page: number };
+  whoop: WhoopToday | null;
+  ask: {
+    phase: "ready" | "listening" | "thinking" | "answer" | "error";
+    followUp: boolean;
+    question: string;
+    lines: string[]; // the answer, wrapped
+    page: number;
+    history: { q: string; a: string }[];
+    error: string | null;
+  };
+  gym: {
+    sets: LoggedSet[];
+    recording: boolean;
+    busy: boolean;
+    message: string | null;
+    restEndsAt: number | null;
+    recovery: number | null; // WHOOP recovery %, once WHOOP is connected
+  };
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+export function clock(d: Date, use24h: boolean): string {
+  if (use24h) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const h = d.getHours() % 12 || 12;
+  return `${h}:${pad(d.getMinutes())} ${d.getHours() < 12 ? "AM" : "PM"}`;
+}
+
+function mmss(ms: number): string {
+  const s = Math.ceil(ms / 1000);
+  return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
+}
+
+interface CardDef {
+  title(st: DashState): string;
+  body(st: DashState): Body;
+  tapHint(st: DashState): string;
+}
+
+// ---------- text fitting ----------
+
+const CHAR_W = 8.8; // average width of a character in the glasses font (px)
+const LINE_H = 27; // line height (px)
+const padOf = (border: boolean) => (border ? 6 : 4);
+const colsFor = (w: number, border = true) => Math.floor((w - 2 * padOf(border) - 4) / CHAR_W);
+const rowsFor = (h: number, border = true) => Math.floor((h - 2 * padOf(border)) / LINE_H);
+
+const trim = (t: string, max: number) => (t.length > max ? t.slice(0, max - 3).trimEnd() + "..." : t);
+
+/** Wrap to a width, keeping the text's own line breaks. */
+export function wrap(text: string, width: number, indent = ""): string[] {
+  const out: string[] = [];
+  for (const para of text.split("\n")) {
+    let line = "";
+    for (const word of para.split(" ")) {
+      if (line && (line + " " + word).length > width) { out.push(line); line = indent + word; }
+      else line = line ? `${line} ${word}` : word;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/** Lines that fit a box: extra lines are dropped and the last visible one gets "...". */
+function fitLines(lines: string[], rows: number): string[] {
+  if (lines.length <= rows) return lines;
+  const out = lines.slice(0, rows);
+  out[rows - 1] = out[rows - 1].replace(/[\s.,;:]*$/, "") + "...";
+  return out;
+}
+
+interface TileOpts { border?: boolean; dim?: boolean; capture?: boolean }
+
+/** A tile whose text is already split into lines; it's trimmed to fit. */
+function box(x: number, y: number, w: number, h: number, lines: string[], o: TileOpts = {}): Tile {
+  const border = o.border ?? true;
+  const cols = colsFor(w, border);
+  const fitted = fitLines(lines.flatMap((l) => (l.length > cols ? wrap(l, cols, l.startsWith("- ") ? "  " : "") : [l])), rowsFor(h, border));
+  return { x, y, w, h, text: fitted.join("\n"), border, dim: o.dim, capture: o.capture };
+}
+
+// Standard spots inside the body area (576 x 202).
+const FULL = { x: 8, y: 2, w: 560, h: 196 }; // one big tile: 6 rows
+const ROWS = rowsFor(FULL.h); // 6
+const COLS = colsFor(FULL.w); // ~60
+const full = (lines: string[], o?: TileOpts) => box(FULL.x, FULL.y, FULL.w, FULL.h, lines, o);
+const message = (text: string): Body => ({ tiles: [full(wrap(text, COLS))] });
+
+const isHeader = (l: string) => /^[A-Z0-9' ]{4,}$/.test(l.trim());
+
+/**
+ * Split into pages of `rows` lines. Each group (e.g. one wrapped bullet) stays on
+ * one page, and a section header never sits alone at the bottom of a page.
+ */
+function pagesOf(groups: string[][], rows = ROWS): string[][] {
+  const out: string[][] = [[]];
+  for (const g of groups) {
+    let page = out[out.length - 1];
+    const fits = page.length + g.length <= rows;
+    const lonelyHeader = isHeader(g[0] ?? "") && page.length > 0 && page.length >= rows - 2;
+    if ((!fits && g.length <= rows) || lonelyHeader) { page = []; out.push(page); }
+    for (const line of g) {
+      if (page.length >= rows) { page = []; out.push(page); }
+      if (!page.length && !line.trim()) continue; // no blank line at the top of a page
+      page.push(line);
+    }
+  }
+  return out.filter((p, i) => p.length || i === 0);
+}
+const pages = (lines: string[], rows = ROWS) => pagesOf(lines.map((l) => [l]), rows);
+
+const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+const short = (d: Date, use24h: boolean) => clock(d, use24h).replace(" AM", "a").replace(" PM", "p");
+
+// ---------- today, page 1: schedule ----------
+// [ NOW · until 7:00 PM / Brandon <> Mudassir Weekly ]   (2-row tile)
+//   later times (dim)   later titles
+
+function scheduleBody(st: DashState): Body {
+  const a = st.agenda;
+  if (a.notConnected) return message("Connect your calendar: open the setup page on your Mac (link in phone settings).");
+  if (a.error && !a.events) return message(`${a.error}\n\nTap to retry.`);
+  if (!a.events) return message("Loading your day...");
+
+  const now = st.now.getTime();
+  const allDay = a.events.filter((e) => e.allDay);
+  const timed = a.events.filter((e) => !e.allDay);
+  const upcoming = timed.filter((e) => new Date(e.end).getTime() > now);
+  const done = timed.length - upcoming.length;
+  const u24 = st.settings.use24h;
+
+  let head: string[];
+  const first = upcoming[0];
+  if (first) {
+    const start = new Date(first.start);
+    const live = start.getTime() <= now;
+    const mins = Math.round((start.getTime() - now) / 60_000);
+    const when = live
+      ? `NOW  ·  until ${clock(new Date(first.end), u24)}`
+      : `NEXT  ·  ${clock(start, u24)}${mins < 120 ? `  ·  in ${mins} min` : ""}`;
+    head = [when, `${first.title}${first.series ? "  *" : ""}`];
+  } else {
+    head = ["NOTHING LEFT TODAY", timed.length ? `${done} meeting${done === 1 ? "" : "s"} done` : "Your calendar is clear"];
+  }
+
+  const left: string[] = [];
+  const right: string[] = [];
+  if (allDay.length) { left.push("all day"); right.push(allDay.map((e) => e.title).join(", ")); }
+  const later = upcoming.slice(1);
+  const room = 4 - left.length;
+  const shown = later.slice(0, later.length > room ? room - 1 : room);
+  for (const e of shown) { left.push(short(new Date(e.start), u24)); right.push(`${e.title}${e.series ? "  *" : ""}`); }
+  if (later.length > shown.length) { left.push(""); right.push(`+${later.length - shown.length} more`); }
+  else if (done && upcoming.length && left.length < 4) { left.push(""); right.push(`${done} done, ${upcoming.length} to go`); }
+
+  const tiles: Tile[] = [box(8, 2, 560, 68, head)];
+  if (right.length) {
+    const cols = colsFor(472, false);
+    tiles.push(box(8, 78, 84, 122, left, { border: false, dim: true }));
+    tiles.push(box(96, 78, 472, 122, right.map((r) => trim(r, cols)), { border: false }));
+  }
+  return { tiles };
+}
+
+// ---------- today, page 2: recovery tile + inbox tile ----------
+
+function zone(r: number): string {
+  return r >= 67 ? "GREEN" : r >= 34 ? "YELLOW" : "RED";
+}
+
+function lifeBody(st: DashState): Body {
+  const w = st.whoop;
+  let rec: string[];
+  if (w?.recovery != null) {
+    rec = ["RECOVERY", `${w.recovery}%  ${zone(w.recovery)}`];
+    if (w.bedtime) rec.push(`Bed by ${w.bedtime}`);
+    if (w.tip) rec.push(...wrap(w.tip, colsFor(244)));
+  } else rec = ["RECOVERY", w ? "Not scored yet" : "WHOOP not connected"];
+
+  const ib = st.inbox.data;
+  let inbox: string[];
+  if (ib) {
+    // "Name: what they want", one per line, most important first.
+    const cols = colsFor(308);
+    const lines = (items: InboxItem[], n: number) => items.slice(0, n).map((i) => trim(i.line, cols));
+    // 6 rows: up to 3 replies + 1 follow-up; spare rows go to whichever list has more.
+    const replyN = Math.min(ib.reply.length, ib.followup.length ? 3 : 5);
+    const followN = Math.min(ib.followup.length, 6 - (replyN ? replyN + 1 : 0) - 1);
+    inbox = [];
+    if (ib.reply.length) inbox.push("REPLY TO", ...lines(ib.reply, replyN));
+    if (followN) inbox.push("FOLLOW UP WITH", ...lines(ib.followup, followN));
+    if (!inbox.length) inbox = ["INBOX", "", "Nothing needs you."];
+  } else inbox = ["INBOX", "", st.inbox.error ?? "Reading your inboxes..."];
+
+  return { tiles: [box(8, 2, 244, 196, rec), box(260, 2, 308, 196, inbox)] };
+}
+
+export const TODAY_PAGES = 2;
+
+// ---------- news: two market tiles, then the stories ----------
+
+function marketTiles(m: Markets | null): Tile[] {
+  const sp = m?.sp500 == null ? "S&P 500   --" : `S&P 500   ${pct(m.sp500)}`;
+  const btc = m?.btc == null ? "BTC   --" : `BTC  $${Math.round(m.btc).toLocaleString("en-US")}  ${m.btcChange == null ? "" : pct(m.btcChange)}`;
+  return [box(8, 2, 276, 42, [m ? sp : "Markets loading..."]), box(292, 2, 276, 42, [m ? btc : ""])];
+}
+
+const LIST = { x: 0, y: 52, w: 576, h: 148 }; // free list under one-row tiles: 5 rows
+
+function readerLines(st: DashState): string[][] {
+  return st.reader ? pages(st.reader.lines) : [[]];
+}
+
+export function readerPages(st: DashState): number {
+  return st.reader && !st.reader.loading ? readerLines(st).length : 1;
+}
+
+/** The summary of a news story, wrapped for a full-width tile. */
+export function storyLines(summary: string): string[] {
+  return summary.split("\n").flatMap((p) => wrap(p, COLS, p.startsWith("- ") ? "  " : ""));
+}
+
+function newsBody(st: DashState): Body {
+  const r = st.reader;
+  if (r) {
+    if (r.loading) return { tiles: [full([r.title, "", "Summarizing..."])] };
+    if (r.error) return { tiles: [full([r.error, "", "Double tap to go back."])] };
+    const p = readerLines(st);
+    return { tiles: [full(p[Math.min(r.page, p.length - 1)])] };
+  }
+  const tiles = marketTiles(st.markets);
+  const n = st.news;
+  const rows = rowsFor(LIST.h, false);
+  let lines: string[];
+  if (!n) lines = ["Loading Morning Brew..."];
+  else if (!n.length) lines = ["No new stories."];
+  else {
+    const c = st.newsCursor;
+    const start = Math.max(0, Math.min(c - 2, n.length - rows));
+    lines = n.slice(start, start + rows).map((h, i) => `${start + i === c ? ">" : "  "}  ${h}`);
+  }
+  tiles.push(box(LIST.x, LIST.y, LIST.w, LIST.h, lines, { border: false, capture: true }));
+  return { tiles };
+}
+
+// ---------- email alert pop-up ----------
+
+export function alertLines(a: EmailAlert): string[] {
+  return [`${a.from}  ·  ${a.tag}`, ...wrap(`Re: ${a.subject}`, COLS, "  "), "", ...a.summary.split("\n").flatMap((p) => wrap(p, COLS))];
+}
+
+export function alertPages(st: DashState): number {
+  const v = st.alertView;
+  return v?.expanded ? pages(alertLines(v.list[v.index])).length : 1;
+}
+
+export function alertFrame(st: DashState): { title: string; body: Body; hint: string } | null {
+  const v = st.alertView;
+  if (!v) return null;
+  const a = v.list[v.index];
+  const count = v.list.length > 1 ? `  ${v.index + 1}/${v.list.length}` : "";
+  if (!v.expanded) {
+    return {
+      title: `● NEW EMAIL${count}`,
+      body: { tiles: [full([`${a.from}  ·  ${a.tag}`, "", ...wrap(a.line, COLS), "", "Tap to read more."])] },
+      hint: "tap  read   2x  close",
+    };
+  }
+  const p = pages(alertLines(a));
+  const page = Math.min(v.page, p.length - 1);
+  const last = page >= p.length - 1;
+  const next = last ? (v.index < v.list.length - 1 ? "tap  next email" : "tap  close") : "tap  more";
+  return {
+    title: `EMAIL${count}  ·  ${a.tag}`,
+    body: { tiles: [full(p[page])] },
+    hint: `${p.length > 1 ? `${page + 1}/${p.length}   ` : ""}${next}`,
+  };
+}
+
+// ---------- inbox: two count tiles, then the list ----------
+
+function inboxLines(d: InboxData): string[] {
+  const out: string[] = [];
+  if (d.reply.length) out.push("REPLY", ...d.reply.map((i) => `  ${i.line}`));
+  if (d.followup.length) out.push("FOLLOW UP", ...d.followup.map((i) => `  ${i.line}`));
+  return out;
+}
+
+const inboxRows = () => rowsFor(LIST.h, false);
+
+export function inboxPages(st: DashState): number {
+  return st.inbox.data ? pages(inboxLines(st.inbox.data), inboxRows()).length : 1;
+}
+
+function inboxBody(st: DashState): Body {
+  const ib = st.inbox;
+  if (!ib.data) return message(ib.error ? `${ib.error}\n\nTap to retry.` : "Reading your 4 inboxes...");
+  const d = ib.data;
+  const lines = inboxLines(d);
+  if (!lines.length) return message("Inbox zero. Nothing needs you.");
+  const p = pages(lines, inboxRows());
+  return {
+    tiles: [
+      box(8, 2, 276, 42, [`${d.reply.length}   TO REPLY`]),
+      box(292, 2, 276, 42, [`${d.followup.length}   TO FOLLOW UP`]),
+      box(LIST.x, LIST.y, LIST.w, LIST.h, p[Math.min(ib.page, p.length - 1)], { border: false, capture: true }),
+    ],
+  };
+}
+
+// ---------- day plan: one big tile per page ----------
+
+export function briefPages(st: DashState): string[][] {
+  const b = st.brief;
+  if (!b.text) return [[]];
+  return pagesOf(b.text.split("\n").map((p) => wrap(p, COLS, p.startsWith("- ") ? "  " : "")));
+}
+
+// ---------- gym: status tile, then today's sets ----------
+
+/** Rest between sets: your base time, plus more when WHOOP says you're under-recovered. */
+export function restSeconds(st: DashState): number {
+  const base = st.settings.restSeconds;
+  const r = st.gym.recovery;
+  if (r == null || r >= 67) return base;
+  return base + (r >= 34 ? 30 : 60);
+}
+
+export const fmtSet = (s: { weight: number; unit: string; reps: number }) =>
+  s.weight ? `${s.weight}x${s.reps}` : `${s.reps} reps`;
+
+function gymBody(st: DashState): Body {
+  const g = st.gym;
+  const now = st.now.getTime();
+  let status: string;
+  let sub = "";
+  if (g.recording) { status = "● LISTENING"; sub = "Say it, then tap when done"; }
+  else if (g.busy) status = "Logging...";
+  else if (g.restEndsAt && g.restEndsAt > now) { status = `REST   ${mmss(g.restEndsAt - now)}`; sub = g.message ?? ""; }
+  else if (g.restEndsAt && now - g.restEndsAt < 5 * 60_000) { status = "GO  ·  next set"; sub = g.message ?? ""; }
+  else { status = "READY"; sub = g.message ?? 'Tap, then say "bench, 185, 8 reps"'; }
+
+  const start = new Date(st.now);
+  start.setHours(0, 0, 0, 0);
+  const today = g.sets.filter((s) => s.t >= start.getTime());
+  // Group today's sets by exercise, most recent exercise first.
+  const groups = new Map<string, LoggedSet[]>();
+  for (const s of [...today].reverse()) groups.set(s.exercise, [...(groups.get(s.exercise) ?? []), s]);
+  const lines = [...groups].map(([ex, sets]) => {
+    const unit = sets[0].weight ? ` (${sets[0].unit})` : "";
+    return `${ex}${unit}   ${sets.reverse().map(fmtSet).join("  ")}`;
+  });
+
+  return {
+    tiles: [
+      box(8, 2, 560, 68, [status, sub]),
+      box(0, 78, 576, 122, lines.length ? lines : ["No sets yet today."], { border: false, capture: true }),
+    ],
+  };
+}
+
+// ---------- ask claude ----------
+
+const ANSWER = { x: 0, y: 52, w: 576, h: 148 }; // free text under a one-row question tile: 5 rows
+const answerRows = () => rowsFor(ANSWER.h, false);
+
+export function askPages(st: DashState): number {
+  return pages(st.ask.lines, answerRows()).length;
+}
+
+function askBody(st: DashState): Body {
+  const a = st.ask;
+  const q = (text: string) => box(8, 2, 560, 42, [`"${trim(text, COLS - 2)}"`]);
+  switch (a.phase) {
+    case "listening":
+      return {
+        tiles: [
+          box(8, 2, 560, 42, ["●  LISTENING..."]),
+          box(ANSWER.x, ANSWER.y, ANSWER.w, ANSWER.h, [a.followUp ? "Ask your follow-up, then tap." : "Speak your question, then tap."], { border: false, capture: true }),
+        ],
+      };
+    case "thinking":
+      return {
+        tiles: [q(a.question || "..."), box(ANSWER.x, ANSWER.y, ANSWER.w, ANSWER.h, ["Looking into it..."], { border: false, capture: true })],
+      };
+    case "answer": {
+      const p = pages(a.lines, answerRows());
+      return { tiles: [q(a.question), box(ANSWER.x, ANSWER.y, ANSWER.w, ANSWER.h, p[Math.min(a.page, p.length - 1)], { border: false, capture: true })] };
+    }
+    case "error":
+      return message(`${a.error ?? "Something went wrong."}\n\nTap to try again.`);
+    default:
+      return {
+        tiles: [full(["READY", "Tap and ask anything, like:", "", '"What did Paul say about the 11/26 post?"',
+          '"When is my next meeting with Brandon?"', '"Summarize what Apple Support wants."'])],
+      };
+  }
+}
+
+// ---------- the cards ----------
+
+const shortDate = (d: Date) => d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+
+export const CARDS: Record<CardId, CardDef> = {
+  agenda: {
+    title: (st) => `TODAY  ·  ${shortDate(st.now)}${st.alerts.length ? `   ● ${st.alerts.length} new` : ""}`,
+    tapHint: (st) => `${st.agendaPage + 1}/${TODAY_PAGES}   tap  more${st.alerts.length ? "   2x  read new" : ""}`,
+    body: (st) => [scheduleBody, lifeBody][st.agendaPage % TODAY_PAGES](st),
+  },
+  news: {
+    title: (st) => (st.reader ? `NEWS  ·  ${trim(st.reader.title, 30)}` : "NEWS"),
+    tapHint: (st) => {
+      if (st.reader) return `${readerPages(st) > 1 ? `${st.reader.page + 1}/${readerPages(st)}   ` : ""}tap  more   2x  back`;
+      return `${st.news?.length ? `${st.newsCursor + 1}/${st.news.length}   ` : ""}tap  next   2x  read`;
+    },
+    body: newsBody,
+  },
+  inbox: {
+    title: () => "INBOX",
+    tapHint: (st) => {
+      const n = inboxPages(st);
+      return `${n > 1 ? `${Math.min(st.inbox.page, n - 1) + 1}/${n}   ` : ""}tap  more`;
+    },
+    body: inboxBody,
+  },
+  gym: {
+    title: (st) => {
+      const n = st.gym.sets.filter((s) => s.t >= new Date(st.now).setHours(0, 0, 0, 0)).length;
+      return `GYM${n ? `  ·  ${n} set${n === 1 ? "" : "s"} today` : ""}`;
+    },
+    tapHint: (st) => (st.gym.recording ? "tap  done" : "tap  log a set"),
+    body: gymBody,
+  },
+  ask: {
+    title: () => "ASK CLAUDE",
+    tapHint: (st) => {
+      const a = st.ask;
+      if (a.phase === "listening") return "tap  done";
+      if (a.phase === "thinking") return "";
+      if (a.phase === "answer") {
+        const n = askPages(st);
+        const more = a.page + 1 < n;
+        return `${n > 1 ? `${a.page + 1}/${n}   ` : ""}tap  ${more ? "more" : "ask again"}   2x  follow-up`;
+      }
+      return "tap  ask";
+    },
+    body: askBody,
+  },
+  brief: {
+    title: (st) => (st.brief.at ? `DAY PLAN  ·  as of ${clock(st.brief.at, st.settings.use24h)}` : "DAY PLAN"),
+    tapHint: (st) => {
+      const n = briefPages(st).length;
+      return `${n > 1 ? `${Math.min(st.briefPage, n - 1) + 1}/${n}   ` : ""}tap  more   2x  new plan`;
+    },
+    body: (st) => {
+      const b = st.brief;
+      if (b.loading) return message("Planning your day...");
+      if (b.error) return message(`${b.error}\n\nDouble tap to retry.`);
+      if (!b.text) return message("Double tap to get your day plan from Claude.");
+      const p = briefPages(st);
+      return { tiles: [full(p[Math.min(st.briefPage, p.length - 1)])] };
+    },
+  },
+};
+
+/** Footer: page dots on the left, a short dim hint on the right. */
+export function footer(st: DashState, current: number): { dots: string; hint: string } {
+  const dots = st.settings.cards.map((_, i) => (i === current ? "●" : "○")).join(" ");
+  if (!st.settings.showHints) return { dots, hint: "" };
+  const alert = alertFrame(st);
+  return { dots, hint: alert ? alert.hint : CARDS[st.settings.cards[current]].tapHint(st) };
+}
+
+/** Header: card title on the left, time + battery on the right. */
+export function header(st: DashState, current: number, battery: number | null): { title: string; status: string } {
+  const title = alertFrame(st)?.title ?? CARDS[st.settings.cards[current]].title(st);
+  const status = [clock(st.now, st.settings.use24h), battery != null ? `${battery}%` : ""].filter(Boolean).join("   ");
+  return { title, status };
+}
