@@ -257,8 +257,10 @@ async function refreshNews() {
       "Kalshi hires Martha Stewart", "Students skip US colleges", "Pattinson named next Bond", "Pet gift guide 2026"];
     return render();
   }
+  if (st.reader) return; // don't swap stories while you're reading one
   try {
     st.news = (await api<{ headlines: string[] }>(st.settings, "/api/news")).headlines;
+    st.newsCursor = Math.min(st.newsCursor, Math.max(0, st.news.length - 1));
     await render();
   } catch {
     /* keep the last headlines */
@@ -838,7 +840,7 @@ async function boot() {
   setInterval(refreshAgenda, 5 * 60_000);
   setInterval(refreshInbox, 15 * 60_000);
   setInterval(refreshWhoop, 20 * 60_000);
-  setInterval(refreshNews, 30 * 60_000);
+  setInterval(refreshNews, 15 * 60_000); // the server only re-picks when the feeds have new stories
   setInterval(refreshBrief, 2 * 60 * 60_000); // keep the day plan current
   setInterval(refreshMarkets, 5 * 60_000);
   setInterval(pollAlerts, ALERT_EVERY_MS);

@@ -1,18 +1,30 @@
-// Top 10 stories from Morning Brew, topped up with Tech Brew when Morning Brew's
-// picks aren't relevant to you, plus an easy-to-read summary of any story and a
-// market snapshot (S&P 500 + Bitcoin). The feeds carry each article's full
-// text, so we never have to load the websites.
+// Top 10 stories: a few big world stories (BBC World, NPR World), then Morning Brew,
+// topped up with Tech Brew, plus an easy-to-read summary of any story and a market
+// snapshot (S&P 500 + Bitcoin). Refreshed at most every 15 minutes, and Claude only
+// re-picks when the feeds actually have new stories.
 import Anthropic from "@anthropic-ai/sdk";
 import type { Env } from "./index";
 
 const FEEDS = [
+  { name: "BBC World", url: "https://feeds.bbci.co.uk/news/world/rss.xml", days: 1 },
+  { name: "NPR World", url: "https://feeds.npr.org/1004/rss.xml", days: 2 },
   { name: "Morning Brew", url: "https://www.morningbrew.com/feed", days: 3 },
   { name: "Tech Brew", url: "https://www.techbrew.com/feed", days: 14 },
 ];
-const CACHE_KEY = "news:top10";
+const CACHE_KEY = "news:top10:v2";
 const COUNT = 10;
+const WORLD = 3; // world-news picks
+const FRESH_MS = 15 * 60_000; // check the feeds at most this often
 
-interface Story { line: string; title: string; text: string }
+interface Story { line: string; title: string; text: string; link?: string }
+interface Cached { at: string; checked?: number; sig?: string; stories: Story[] }
+
+/** A short fingerprint of which stories are in the feeds, to skip Claude when nothing's new. */
+async function signature(titles: string[]): Promise<string> {
+  const data = new TextEncoder().encode([...titles].sort().join("\n"));
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-1", data));
+  return [...hash.slice(0, 8)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 const decode = (s: string) =>
   s
@@ -46,9 +58,10 @@ function ask(env: Env, system: string, content: string, schema: Record<string, u
     });
 }
 
-async function stories(env: Env): Promise<{ at: string; stories: Story[] }> {
-  const cached = await env.TOKENS.get(CACHE_KEY);
-  if (cached) return JSON.parse(cached);
+async function stories(env: Env, refresh = true): Promise<Cached> {
+  const raw = await env.TOKENS.get(CACHE_KEY);
+  const cached = raw ? (JSON.parse(raw) as Cached) : null;
+  if (cached && (!refresh || Date.now() - (cached.checked ?? Date.parse(cached.at)) < FRESH_MS)) return cached;
 
   const lists = await Promise.all(
     FEEDS.map(async (f) => {
@@ -60,6 +73,7 @@ async function stories(env: Env): Promise<{ at: string; stories: Story[] }> {
         .map((m) => ({
           source: f.name,
           title: tag(m[1], "title"),
+          link: tag(m[1], "link") || tag(m[1], "guid"),
           summary: tag(m[1], "description").slice(0, 200),
           text: tag(m[1], "content:encoded").slice(0, 6000),
           at: Date.parse(tag(m[1], "pubDate")),
@@ -69,15 +83,28 @@ async function stories(env: Env): Promise<{ at: string; stories: Story[] }> {
     }),
   );
   const items = lists.flat();
-  if (!items.length) throw new Error("News feeds are unreachable right now.");
+  if (!items.length) {
+    if (cached) return cached;
+    throw new Error("News feeds are unreachable right now.");
+  }
+  const sig = await signature(items.map((i) => i.title));
+  if (cached?.sig === sig) {
+    // Nothing new: keep today's picks, just note that we checked.
+    const same = { ...cached, checked: Date.now() };
+    await env.TOKENS.put(CACHE_KEY, JSON.stringify(same), { expirationTtl: 6 * 3600 });
+    return same;
+  }
 
   const picked = (await ask(
     env,
-    `Pick exactly ${COUNT} stories for the founder of an AI music-video startup. Relevant: AI, tech, startups, ` +
+    `Pick exactly ${COUNT} stories for the founder of an AI music-video startup. ` +
+      `First, the ${WORLD} most important world news stories from BBC World or NPR World: wars and conflicts, ` +
+      "geopolitics, major elections, the global economy, big disasters. Skip minor or local stories there. " +
+      `Then ${COUNT - WORLD} from Morning Brew and Tech Brew. Relevant there: AI, tech, startups, ` +
       "venture funding, big tech, markets, crypto, chips, policy that affects tech, the creator economy and music industry. " +
       "Never pick stories they don't care about, even to reach the count: celebrities and movie casting (e.g. a new Bond), " +
       "gift guides, lifestyle, college and student trends (e.g. international students leaving the US), sports, food, travel. " +
-      "Take the relevant Morning Brew stories first, then fill the rest with Tech Brew. Favor the newest. " +
+      "Take the relevant Morning Brew stories first, then fill the rest with Tech Brew. Favor the newest. List the world stories first. " +
       "Never two picks about the same company or event. " +
       'For each, give its number and a plain, factual line of at most 36 characters, e.g. "Nvidia beats earnings, outlook murky". No emoji, no quotes.',
     items.map((i, n) => `[${n}] (${i.source}) ${i.title}: ${i.summary}`).join("\n"),
@@ -94,14 +121,16 @@ async function stories(env: Env): Promise<{ at: string; stories: Story[] }> {
     },
   )) as { picks: { n: number; line: string }[] };
 
-  const out = {
+  const out: Cached = {
     at: new Date().toISOString(),
+    checked: Date.now(),
+    sig,
     stories: picked.picks
       .filter((p) => items[p.n])
       .slice(0, COUNT)
-      .map((p) => ({ line: p.line.slice(0, 38), title: items[p.n].title, text: items[p.n].text || items[p.n].summary })),
+      .map((p) => ({ line: p.line.length <= 38 ? p.line : p.line.slice(0, 38).replace(/\s+\S*$/, ""), title: items[p.n].title, text: items[p.n].text || items[p.n].summary, link: items[p.n].link })),
   };
-  await env.TOKENS.put(CACHE_KEY, JSON.stringify(out), { expirationTtl: 2 * 3600 });
+  await env.TOKENS.put(CACHE_KEY, JSON.stringify(out), { expirationTtl: 6 * 3600 });
   return out;
 }
 
@@ -156,8 +185,19 @@ export async function markets(env: Env): Promise<Markets> {
 }
 
 /** An easy-to-read summary of headline number n, sized for the glasses. */
+/** World-news feeds only carry a teaser, so read the article page for the summary. */
+async function fullText(story: Story): Promise<string> {
+  if (story.text.length >= 1500 || !story.link?.startsWith("https://")) return story.text;
+  const res = await fetch(story.link.replace(/&amp;/g, "&"), { headers: { "User-Agent": "Mozilla/5.0 (ClaudeDash personal reader)" } }).catch(() => null);
+  if (!res?.ok) return story.text;
+  const html = await res.text();
+  const paras = [...html.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/g)].map((m) => decode(m[1])).filter((p) => p.length > 60);
+  return paras.join("\n").slice(0, 6000) || story.text;
+}
+
 export async function article(env: Env, n: number): Promise<{ title: string; summary: string }> {
-  const { stories: list } = await stories(env);
+  // Use the list you're looking at (no refresh), so story n is the one you picked.
+  const { stories: list } = await stories(env, false);
   const story = list[n];
   if (!story) throw new Error("That story is gone. Go back and pick again.");
   const key = `news:sum:${story.title.slice(0, 120)}`;
@@ -169,7 +209,7 @@ export async function article(env: Env, n: number): Promise<{ title: string; sum
     "Summarize this news article for someone reading on smart glasses (40 characters per line). " +
       "Format: one plain sentence with the main point, then 3 to 4 short bullets starting with \"- \" for the key facts, " +
       'then a line starting "Why it matters: " for a startup founder. Plain text, no markdown, no emoji. At most 110 words.',
-    `${story.title}\n\n${story.text}`,
+    `${story.title}\n\n${await fullText(story)}`,
     { type: "object", properties: { summary: { type: "string" } }, required: ["summary"], additionalProperties: false },
   )) as { summary: string };
   await env.TOKENS.put(key, summary, { expirationTtl: 24 * 3600 });
