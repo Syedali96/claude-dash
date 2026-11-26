@@ -32,6 +32,34 @@ export async function api<T>(s: Settings, path: string, init: RequestInit = {}):
   return data;
 }
 
+/** Like api(), but the reply is streamed text: onText gets everything received so far. */
+export async function apiStream(s: Settings, path: string, init: RequestInit, onText: (soFar: string) => void): Promise<string> {
+  const headers = new Headers(init.headers);
+  if (token(s)) headers.set("Authorization", `Bearer ${token(s)}`);
+  let res: Response;
+  try {
+    res = await fetch(serverBase(s) + path, { ...init, headers });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    throw new ApiError("Can't reach the server.", 0);
+  }
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new ApiError(data.error ?? `Server error ${res.status}`, res.status, data.error);
+  }
+  if (!res.body?.getReader) { const t = await res.text(); onText(t); return t; }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += dec.decode(value, { stream: true });
+    onText(text);
+  }
+  return text;
+}
+
 /** Link to the one-time setup page (open it on your Mac to connect Google). */
 export function setupUrl(s: Settings): string {
   const base = serverBase(s) || location.origin;

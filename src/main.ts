@@ -7,7 +7,7 @@ import {
   OsEventTypeList,
   waitForEvenAppBridge,
 } from "@evenrealities/even_hub_sdk";
-import { ApiError, api } from "./api";
+import { ApiError, api, apiStream } from "./api";
 import { alertFrame, alertPages, askPages, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
 import { drawBlank, drawFrame, type Frame, MENU, shapeChanged, updateRegion, updateTile } from "./layout";
 import { canonicalName, exerciseKey, nextTip } from "./exercises";
@@ -617,18 +617,97 @@ async function stopAsk() {
   await render(true);
 }
 
-// ---------- listen: keep the last 2 minutes, explain on tap ----------
+// ---------- listen: transcribe as you talk, explain on tap ----------
+//
+// While it's on, speech (quiet stretches dropped) collects in `pending`. Every
+// 30 seconds that goes to Groq in the background and the text is kept for the
+// last 2 minutes. A tap only sends that text plus the few seconds not yet sent.
 
-const LISTEN_MAX_BYTES = 16_000 * 2 * LISTEN_SECONDS; // 16 kHz, 16-bit, mono
-let listenBuf: Uint8Array[] = [];
-let listenBytes = 0;
+const BYTES_PER_SEC = 16_000 * 2; // 16 kHz, 16-bit, mono
+const CHUNK_MS = 30_000;
+const QUIET_RMS = 150; // below this a mic chunk counts as silence (out of 32768)
+const HANGOVER_MS = 700; // keep this much after speech so words aren't clipped
+const MAX_PENDING = BYTES_PER_SEC * 60; // never hold more than a minute unsent
+
+let pending: Uint8Array[] = [];
+let pendingBytes = 0;
+let lastQuiet: Uint8Array | null = null; // one chunk of lead-in before speech starts
+let lastVoice = 0;
+let segments: { seq: number; end: number; text: string }[] = [];
+let seq = 0;
+const inflight = new Set<Promise<void>>();
+let chunkTimer: ReturnType<typeof setInterval> | undefined;
 let listenAsk = 0; // ignores an answer that arrives after you went back or stopped
+let listenAbort: AbortController | null = null;
+let session = 0; // a chunk that comes back after you stopped (or restarted) is dropped
 
-/** Add mic audio to the rolling buffer, dropping the oldest beyond 2 minutes. Memory only. */
+function rms(chunk: Uint8Array): number {
+  const v = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  let sum = 0;
+  const n = Math.floor(chunk.byteLength / 2);
+  for (let i = 0; i < n; i++) { const x = v.getInt16(i * 2, true); sum += x * x; }
+  return n ? Math.sqrt(sum / n) : 0;
+}
+
+/** Keep speech, drop silence. Memory only. */
 function keepAudio(chunk: Uint8Array) {
-  listenBuf.push(chunk);
-  listenBytes += chunk.length;
-  while (listenBytes - listenBuf[0].length >= LISTEN_MAX_BYTES) listenBytes -= listenBuf.shift()!.length;
+  const now = Date.now();
+  const voiced = rms(chunk) >= QUIET_RMS;
+  if (voiced) {
+    if (now - lastVoice > HANGOVER_MS && lastQuiet) { pending.push(lastQuiet); pendingBytes += lastQuiet.length; }
+    lastVoice = now;
+  }
+  if (voiced || now - lastVoice <= HANGOVER_MS) {
+    pending.push(chunk);
+    pendingBytes += chunk.length;
+    while (pendingBytes > MAX_PENDING) pendingBytes -= pending.shift()!.length;
+    lastQuiet = null;
+  } else lastQuiet = chunk;
+}
+
+function takePending(): Uint8Array {
+  const audio = new Uint8Array(pendingBytes);
+  let at = 0;
+  for (const c of pending) { audio.set(c, at); at += c.length; }
+  pending = []; pendingBytes = 0;
+  return audio;
+}
+
+/** The text of the last 2 minutes, oldest first. */
+function transcript(): string {
+  const cutoff = Date.now() - LISTEN_SECONDS * 1000;
+  segments = segments.filter((x) => x.end >= cutoff);
+  return segments.sort((a, b) => a.seq - b.seq).map((x) => x.text).filter(Boolean).join(" ");
+}
+
+/** Every 30 s: send the speech collected so far to Groq in the background. */
+function sendChunk() {
+  if (pendingBytes < BYTES_PER_SEC) return; // under a second of speech: wait for more
+  const audio = takePending();
+  const mine = ++seq;
+  const prev = encodeURIComponent(transcript().slice(-200));
+  const mySession = session;
+  const p = api<{ text: string }>(st.settings, `/api/listen/transcribe?prev=${prev}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: audio,
+  })
+    .then((r) => { if (mySession === session) segments.push({ seq: mine, end: Date.now(), text: r.text }); })
+    .catch(() => {
+      // Put it back so the next chunk (or a tap) carries it, unless you stopped meanwhile.
+      if (mySession !== session) return;
+      pending.unshift(audio); pendingBytes += audio.length;
+    })
+    .finally(() => inflight.delete(p));
+  inflight.add(p);
+}
+
+function resetListen() {
+  session++;
+  clearInterval(chunkTimer);
+  pending = []; pendingBytes = 0; lastQuiet = null; lastVoice = 0;
+  segments = []; seq = 0;
+  inflight.clear();
 }
 
 async function startListen() {
@@ -636,21 +715,23 @@ async function startListen() {
     st.listen = { ...st.listen, phase: "error", error: "Listening works on the glasses." };
     return render(true);
   }
-  listenBuf = []; listenBytes = 0;
+  resetListen();
   const ok = await bridge.audioControl(true, AudioInputSource.Glasses).catch(() => false);
   if (!ok) {
     st.listen = { ...st.listen, phase: "error", error: "Mic didn't start." };
     return render(true);
   }
   st.listen = { phase: "listening", topic: "", lines: [], page: 0, error: null };
+  chunkTimer = setInterval(sendChunk, CHUNK_MS);
   await render(true);
 }
 
-/** Mic off and the audio thrown away. */
+/** Mic off and everything (audio and text) thrown away. */
 async function stopListen() {
   if (st.listen.phase === "off") return;
   listenAsk++;
-  listenBuf = []; listenBytes = 0;
+  listenAbort?.abort();
+  resetListen();
   st.listen = { phase: "off", topic: "", lines: [], page: 0, error: null };
   await bridge?.audioControl(false).catch(() => false);
 }
@@ -658,29 +739,65 @@ async function stopListen() {
 /** Back to just the dots (the mic never stopped). */
 function backToDots() {
   listenAsk++;
+  listenAbort?.abort();
   st.listen = { phase: "listening", topic: "", lines: [], page: 0, error: null };
   return render(true);
 }
 
-async function explain(text?: string) {
-  const audio = new Uint8Array(listenBytes);
-  let at = 0;
-  for (const c of listenBuf) { audio.set(c, at); at += c.length; }
+/** "TOPIC: X\n- a\n- b" so far → topic and finished points (the last line may still be arriving). */
+function parseStream(text: string, done: boolean): { topic: string; points: string[]; error: string | null; heard: string } {
+  const lines = text.split("\n");
+  if (!done) lines.pop(); // incomplete
+  let topic = "";
+  let points: string[] = [];
+  let error: string | null = null;
+  let heard = "";
+  for (const raw of lines.map((l) => l.trim())) {
+    if (/^topic:/i.test(raw)) { topic = raw.replace(/^topic:\s*/i, ""); points = []; } // a new TOPIC replaces an earlier one
+    else if (/^[-•*◆]\s*/.test(raw) && topic) points.push(raw.replace(/^[-•*◆]\s*/, ""));
+    else if (/^error:/i.test(raw)) error = raw.replace(/^error:\s*/i, "");
+    else if (/^heard:/i.test(raw)) heard = raw.replace(/^heard:\s*/i, "");
+  }
+  if (/^none$/i.test(topic)) topic = "";
+  return { topic, points, error, heard };
+}
+
+async function explain(typed?: string) {
   const id = ++listenAsk;
+  listenAbort = new AbortController();
   st.listen = { ...st.listen, phase: "thinking", error: null };
   await render(true);
-  try {
-    const res = await api<{ topic: string; points: string[] }>(st.settings, "/api/listen", {
-      method: "POST",
-      body: JSON.stringify({
-        ...(text ? { text } : { audio: toBase64(audio) }),
-        now: new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }),
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      }),
-    });
+  // Wait for chunks already on their way to Groq, then add the few seconds not sent yet.
+  if (inflight.size) await Promise.race([Promise.allSettled([...inflight]), new Promise((r) => setTimeout(r, 4000))]);
+  if (id !== listenAsk) return;
+  const form = new FormData();
+  form.set("transcript", typed ?? transcript());
+  const tail = typed ? null : takePending();
+  if (tail?.length) form.set("audio", new Blob([tail], { type: "application/octet-stream" }), "tail.pcm");
+  form.set("now", new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
+  form.set("timeZone", Intl.DateTimeFormat().resolvedOptions().timeZone);
+
+  let shown = "";
+  const show = async (text: string, done: boolean) => {
     if (id !== listenAsk) return;
-    if (!res.topic) st.listen = { ...st.listen, phase: "error", error: "Didn't hear enough to explain yet." };
-    else st.listen = { ...st.listen, phase: "answer", topic: res.topic, lines: listenLines(res.points), page: 0 };
+    const r = parseStream(text, done);
+    if (!r.topic) return;
+    const key = `${r.topic}|${r.points.length}`;
+    if (key === shown) return;
+    const first = !shown;
+    shown = key;
+    st.listen = { ...st.listen, phase: "answer", topic: r.topic, lines: listenLines(r.points), page: st.listen.phase === "answer" ? st.listen.page : 0 };
+    await render(first); // full redraw once for the topic tile, then just new points
+  };
+  try {
+    const text = await apiStream(st.settings, "/api/listen", { method: "POST", body: form, signal: listenAbort.signal }, (t) => { show(t, false); });
+    if (id !== listenAsk) return;
+    const r = parseStream(text, true);
+    // The server transcribed the unsent seconds: keep them for the next tap.
+    if (r.heard) segments.push({ seq: ++seq, end: Date.now(), text: r.heard });
+    if (r.error) st.listen = { ...st.listen, phase: "error", error: r.error };
+    else if (!r.topic) st.listen = { ...st.listen, phase: "error", error: "Didn't hear enough to explain yet." };
+    else { await show(text, true); return; }
   } catch (e) {
     if (id !== listenAsk) return;
     st.listen = { ...st.listen, phase: "error", error: e instanceof Error ? e.message : "Couldn't reach Claude." };

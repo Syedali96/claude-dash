@@ -86,7 +86,8 @@ Glasses (G2) ⇄ Even app WebView (phone) runs the Claude Dash web app (Vite + T
 | `POST /api/gym/parse` | Raw 16 kHz PCM in, `{text, set:{exercise,weight,unit,reps}}` out |
 | `POST /api/gym/command` | `{audio(base64 PCM) or text, today[], known[]}` in, `{text, command}` out. Command is log / undo / delete / edit / finish / query / none |
 | `POST /api/ask` | `{audio(base64 PCM) or text, history, now, timeZone}` in, `{question, answer}` out |
-| `POST /api/listen` | `{audio(base64 PCM, last 2 min) or text, now, timeZone}` in, `{topic, points[]}` out (empty topic = nothing to explain). Not stored or logged. |
+| `POST /api/listen/transcribe?prev=` | Raw 16 kHz PCM body in, `{text}` out. `prev` = end of the transcript so far (Whisper hint). |
+| `POST /api/listen` | Form: `transcript`, optional `audio` (raw PCM tail), `now`, `timeZone`. Streams text: `HEARD:` line, `TOPIC:` line, `- ` points (`TOPIC: NONE` = nothing to explain, `ERROR:` on failure). Not stored or logged. |
 
 ## 4. The glasses app today (v0.8.0)
 
@@ -156,11 +157,12 @@ Double-tap special cases:
 
 - **Listen** (after Ask Claude)
   - Tap to start: the glasses mic stays on and the screen shows only three dim dots (no header or footer).
-  - The phone keeps the last 2 minutes of audio in memory only (rolling buffer, `LISTEN_SECONDS`). Nothing is transcribed or sent until a tap.
-  - Tap: the buffer goes to `POST /api/listen`. Groq transcribes it, Claude picks the one topic worth explaining and returns `TOPIC:` plus 4–6 short points (at most 1 web search). Shown as a topic tile with "◆" points, paged; "● ● ●" in the footer means the mic is still on.
+  - Since 0.11.0: silence is dropped on the phone (RMS < `QUIET_RMS`, 0.7 s hangover). Every 30 s the speech so far goes as raw bytes to `POST /api/listen/transcribe` (Groq) in the background; the phone keeps the text for the last 2 minutes (`LISTEN_SECONDS`). Audio leaves the phone while listening, but nothing is stored.
+  - Tap: waits for any chunk in flight, then sends the transcript plus the unsent tail audio (multipart) to `POST /api/listen`. The reply streams as plain text: `HEARD: <tail text>` (kept for the next tap), then `TOPIC:` and 4–6 "- " points. The topic tile appears as soon as its line arrives and points fill in. Shown as a topic tile with "◆" points, paged; "● ● ●" in the footer means the mic is still on.
+  - Model: Opus at low effort with at most 1 web search. Measured: first text ~0.6–0.9 s; Haiku was slower here (5–7 s) because it usually ran a web search first. Through the Worker the topic shows ~1–1.3 s after the text arrives.
   - Tap on the last page (or 2x) goes back to the dots; it keeps listening the whole time. 2x on the dots stops. Swiping to another card stops and forgets the audio. Hold = display off, still listening.
   - No auto-sleep and no email pop-ups while it's on (alerts go to the badge). No read-aloud.
-  - Measured: about 3–4 s per tap from the Mac with a full 2 minutes (3.8 MB). Battery use not measured yet.
+  - 0.10.0 sent the whole 2 minutes on tap (3.8 MB, ~3–4 s from the Mac). Battery use not measured yet.
 
 ### Phone settings page
 
@@ -222,6 +224,7 @@ npx wrangler kv key delete --binding TOKENS --remote "<key>"   # clear a cache (
 - 0.9.0 (built Nov 24, not shipped yet): gym voice edits ("cancel that", "delete my second bench set", "that was 10 reps"), exercise name merging (`src/exercises.ts`), rest by lift type (heavy 2:30 / compound 2:00 / isolation 1:00, +0:30 yellow, +1:00 red), "workout complete" summary (volume vs last, PRs, sets, WHOOP strain, best set per exercise vs last time), no "first time" text; after each set a "next: 145x8 (add 5 lb)" tip (double progression: heavy 5-8, compound 8-12, isolation 10-15 reps; +10 lb big lower-body lifts, +5 lb others); summary fits one page (◆ lifts that beat last time, then "Matched last time / Below last time / No history yet" groups). The logger also answers questions ("what was my last bench?") with last session's sets and a "start at" weight. Ask: read-aloud removed, tap on last page = follow-up with context (last 6 kept), double tap = new chat. Settings v11.
 - News (also v0.9.0): 3 world stories first (BBC World, NPR World), then Morning Brew / Tech Brew. The app polls every 15 min; the server re-checks feeds at most every 15 min (cache `news:top10:v2`) and only calls Claude when the feed titles changed. World-story summaries read the article page because those feeds only carry teasers.
 - 0.10.0: Listen card (Ali's choices: 2 minutes back, quick explainer, keeps listening after an answer, no read-aloud). Footer dots widened for 7 cards. Settings v12.
+- 0.11.0: faster Listen: background transcription every 30 s, silence dropped, raw audio instead of base64, streamed answer (topic first).
 - Testing hooks (dev only): `?listentest=<transcript>` shows a Listen answer, `?listentest=dots` the listening screen; `LOCAL_API=1 npm run dev` uses the local Worker; `?gymseed` loads sample history, `?gymtest=a|b` runs typed gym commands, `?asktest=q1|q2` asks typed questions in one chat.
 
 ## 7. Known limits and gotchas
