@@ -87,7 +87,7 @@ Glasses (G2) ⇄ Even app WebView (phone) runs the Claude Dash web app (Vite + T
 | `POST /api/gym/command` | `{audio(base64 PCM) or text, today[], known[]}` in, `{text, command}` out. Command is log / undo / delete / edit / finish / query / none |
 | `POST /api/ask` | `{audio(base64 PCM) or text, history, now, timeZone}` in, `{question, answer}` out |
 | `POST /api/listen/transcribe?prev=` | Raw 16 kHz PCM body in, `{text}` out. `prev` = end of the transcript so far (Whisper hint). |
-| `POST /api/listen` | Form: `transcript`, optional `audio` (raw PCM tail), `now`, `timeZone`. Streams text: `HEARD:` line, `TOPIC:` line, `- ` points (`TOPIC: NONE` = nothing to explain, `ERROR:` on failure). Not stored or logged. |
+| `POST /api/listen` | Form: `transcript`, optional `audio` (raw PCM tail), `now`, `timeZone`. Streams text: `HEARD:` line, `TOPIC:` line, `- ` points, `SEARCH:` line, then maybe `LATEST:` (`TOPIC: NONE` = nothing to explain, `ERROR:` on failure). Not stored or logged. |
 
 ## 4. The glasses app today (v0.8.0)
 
@@ -157,9 +157,10 @@ Double-tap special cases:
 
 - **Listen** (after Ask Claude)
   - Tap to start: the glasses mic stays on and the screen shows only three dim dots (no header or footer).
-  - Since 0.11.0: silence is dropped on the phone (RMS < `QUIET_RMS`, 0.7 s hangover). Every 30 s the speech so far goes as raw bytes to `POST /api/listen/transcribe` (Groq) in the background; the phone keeps the text for the last 2 minutes (`LISTEN_SECONDS`). Audio leaves the phone while listening, but nothing is stored.
+  - Since 0.11.0: silence is dropped on the phone (RMS < `QUIET_RMS`, 0.7 s hangover). Every 10 s (30 s before 0.13.0) the speech so far goes as raw bytes to `POST /api/listen/transcribe` (Groq) in the background; the phone keeps the text for the last 2 minutes (`LISTEN_SECONDS`). Audio leaves the phone while listening, but nothing is stored.
   - Tap: waits for any chunk in flight, then sends the transcript plus the unsent tail audio (multipart) to `POST /api/listen`. The reply streams as plain text: `HEARD: <tail text>` (kept for the next tap), then `TOPIC:` and 4–6 "- " points. The topic tile appears as soon as its line arrives and points fill in. Shown as a topic tile with "◆" points, paged; "● ● ●" in the footer means the mic is still on.
-  - Model: Opus at low effort with at most 1 web search. Measured: first text ~0.6–0.9 s; Haiku was slower here (5–7 s) because it usually ran a web search first. Through the Worker the topic shows ~1–1.3 s after the text arrives.
+  - Since 0.13.0: answer first, search after. Step 1 is Opus low effort with no tools (topic ~0.7–1.7 s), ending with `SEARCH: <query>|NONE`. If there's a query, the hint shows "checking latest..." and step 2 (Opus low + 1 web search, ~8 s) sends `LATEST: <fact>|NONE`; a fact is shown on top as "> LATEST: ...". Tap waits at most 2 s for a chunk still at Groq. Measured Nov 26 before this: news topics took 11–13 s to show anything because the search ran first.
+  - Model (0.11–0.12): Opus at low effort with at most 1 web search. Measured: first text ~0.6–0.9 s; Haiku was slower here (5–7 s) because it usually ran a web search first. Through the Worker the topic shows ~1–1.3 s after the text arrives.
   - Tap on the last page (or 2x) goes back to the dots; it keeps listening the whole time. 2x on the dots stops. Swiping to another card stops and forgets the audio. Hold = display off, still listening.
   - No auto-sleep and no email pop-ups while it's on (alerts go to the badge). No read-aloud.
   - 0.10.0 sent the whole 2 minutes on tap (3.8 MB, ~3–4 s from the Mac). Battery use not measured yet.
@@ -226,6 +227,7 @@ npx wrangler kv key delete --binding TOKENS --remote "<key>"   # clear a cache (
 - 0.10.0: Listen card (Ali's choices: 2 minutes back, quick explainer, keeps listening after an answer, no read-aloud). Footer dots widened for 7 cards. Settings v12.
 - 0.11.0: faster Listen: background transcription every 30 s, silence dropped, raw audio instead of base64, streamed answer (topic first).
 - 0.12.0 (Nov 26): speed. Worker returns saved copies at once and refreshes in the background (`worker/cache.ts`, keys `inbox:v2`, `whoop:today:v2`, `markets:v2`); a 15-minute cron (`scheduled` in `worker/index.ts`, `triggers` in `wrangler.jsonc`) rebuilds inbox, news, WHOOP and markets, and the inbox only re-asks Claude when the threads changed (SHA-1 signature). Ask streams: multipart in (raw audio), reply is `QUESTION: ...\n` then text, `\x1e` = drop the text before a lookup. Gym also sends raw audio (multipart; JSON still accepted). Streams send `Content-Encoding: identity` (gzip held Listen/Ask text until the end). Email alerts and the WHOOP tip use `claude-haiku-5-5` (about 1 s faster, measured); gym and everything else stay on Opus. Phone saves the last screens (`claude-dash-snapshot`) and shows them at launch, with "updated h:mm" in the footer when over 5 minutes old; the day plan isn't remade at launch if under 2 hours old. Redraws only swap changed text unless the layout changed or more than 3 boxes changed. Listen dots are smaller and animate (one bright dot steps every 0.5 s). Ali chose to keep background polling while asleep as it was.
+- 0.13.0: Listen answers first and searches after ("> LATEST" line), 10-second background chunks, 2 s max wait at tap.
 - Testing hooks (dev only): `?savedtest` shows the "updated" footer; `?listentest=<transcript>` shows a Listen answer, `?listentest=dots` the listening screen; `LOCAL_API=1 npm run dev` uses the local Worker; `?gymseed` loads sample history, `?gymtest=a|b` runs typed gym commands, `?asktest=q1|q2` asks typed questions in one chat.
 
 ## 7. Known limits and gotchas

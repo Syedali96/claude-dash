@@ -18,17 +18,23 @@ wants to quickly understand what's being discussed, so he can follow along and e
 
 Pick the ONE topic most worth explaining: usually the most recent concept, term, company, person,
 event or claim that came up, favoring things a smart founder might not know in depth.
-Decide first whether you need web_search (only for recent facts: news, prices, new products), and
-search before writing anything.
-
-Then reply in exactly this plain-text format, nothing else:
+Answer right away from what you know. Reply in exactly this plain-text format, nothing else:
 TOPIC: <2 to 5 words>
 - <key point, at most 55 characters>
 - <key point>
 - <key point>
 - <key point>
+SEARCH: <a short web search query, or NONE>
 Give 4 to 6 points, most useful first: what it is, why it matters, then a useful detail or number.
-No markdown, no emoji, no source links. If the transcript has nothing to explain, reply only: TOPIC: NONE`;
+SEARCH is a query only when fresh facts would clearly help (recent news, earnings, prices, launches,
+anything that may have changed since your training); otherwise NONE. Don't hedge in the points about
+facts you'd search for. No markdown, no emoji, no source links.
+If the transcript has nothing to explain, reply only: TOPIC: NONE`;
+
+const LATEST_SYSTEM = `Search the web once, then reply with exactly one line, nothing else:
+LATEST: <the single most useful fresh fact, at most 48 characters, with a number or date if possible>
+Use the most recent figures available as of "Now" and name the period (e.g. "Q3 FY27"). Only include something new that the existing points don't already say. If nothing new, reply: LATEST: NONE
+Plain text, no markdown, no links.`;
 
 /** POST raw 16 kHz PCM, get back {text}. `?prev=` is the end of the transcript so far (helps Whisper). */
 export async function listenTranscribe(req: Request, env: Env, url: URL): Promise<{ text: string }> {
@@ -40,7 +46,8 @@ export async function listenTranscribe(req: Request, env: Env, url: URL): Promis
 
 /**
  * Form fields: transcript (text so far), audio (optional raw PCM, the last few seconds), now, timeZone.
- * Streams plain text: "TOPIC: ...\n- point\n- point".
+ * Streams plain text: "HEARD: ..." (if audio), "TOPIC: ...", "- point" lines, "SEARCH: query|NONE",
+ * then, only when a search was asked for, "LATEST: fact|NONE" a few seconds later.
  */
 export async function listen(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
@@ -57,6 +64,8 @@ export async function listen(req: Request, env: Env): Promise<Response> {
   if (transcript.split(/\s+/).length < 4) return text(`${heardLine}TOPIC: NONE`);
 
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const now = `(Now: ${form.get("now") ?? new Date().toISOString()}, time zone ${form.get("timeZone") || "America/New_York"})`;
+  // Step 1: answer straight away from what Claude knows (no tools, so nothing waits on a search).
   const stream = client.beta.messages.stream({
     model: MODEL,
     max_tokens: 1500,
@@ -64,11 +73,7 @@ export async function listen(req: Request, env: Env): Promise<Response> {
     betas: ["server-side-fallback-2026-07-01"],
     fallbacks: "default",
     system: SYSTEM,
-    tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 1 }],
-    messages: [{
-      role: "user",
-      content: `(Now: ${form.get("now") ?? new Date().toISOString()}, time zone ${form.get("timeZone") || "America/New_York"})\nTranscript:\n${transcript.slice(-6000)}`,
-    }],
+    messages: [{ role: "user", content: `${now}\nTranscript:\n${transcript.slice(-6000)}` }],
   });
 
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -77,8 +82,30 @@ export async function listen(req: Request, env: Env): Promise<Response> {
   (async () => {
     try {
       if (heardLine) await writer.write(enc.encode(heardLine));
+      let answer = "";
       for await (const ev of stream) {
-        if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") await writer.write(enc.encode(ev.delta.text));
+        if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
+          answer += ev.delta.text;
+          await writer.write(enc.encode(ev.delta.text));
+        }
+      }
+      await writer.write(enc.encode("\n")); // ends the SEARCH line so the phone can show "checking latest..."
+      // Step 2: if fresh facts would help, search now and send one "LATEST:" line.
+      const query = /^SEARCH:\s*(.+)$/im.exec(answer)?.[1]?.trim() ?? "";
+      if (query && !/^none$/i.test(query)) {
+        const res = await client.beta.messages.create({
+          model: MODEL,
+          max_tokens: 1000,
+          output_config: { effort: "low" },
+          betas: ["server-side-fallback-2026-07-01"],
+          fallbacks: "default",
+          system: LATEST_SYSTEM,
+          tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 1 }],
+          messages: [{ role: "user", content: `${now}\nSearch for: ${query}\nExisting points:\n${answer.replace(/^SEARCH:.*$/im, "").trim()}` }],
+        });
+        const out = res.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+        const latest = /^LATEST:\s*(.+)$/im.exec(out)?.[1]?.trim() ?? "NONE";
+        await writer.write(enc.encode(`LATEST: ${latest}\n`));
       }
     } catch (e) {
       await writer.write(enc.encode(`\nERROR: ${e instanceof Error ? e.message : "Claude error"}`)).catch(() => {});

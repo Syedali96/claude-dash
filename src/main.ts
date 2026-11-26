@@ -703,7 +703,7 @@ async function askStream(q: { audio?: Uint8Array; text?: string }) {
 // last 2 minutes. A tap only sends that text plus the few seconds not yet sent.
 
 const BYTES_PER_SEC = 16_000 * 2; // 16 kHz, 16-bit, mono
-const CHUNK_MS = 30_000;
+const CHUNK_MS = 10_000; // short chunks: less left to transcribe when you tap
 const QUIET_RMS = 150; // below this a mic chunk counts as silence (out of 32768)
 const HANGOVER_MS = 700; // keep this much after speech so words aren't clipped
 const MAX_PENDING = BYTES_PER_SEC * 60; // never hold more than a minute unsent
@@ -824,21 +824,28 @@ function backToDots() {
 }
 
 /** "TOPIC: X\n- a\n- b" so far → topic and finished points (the last line may still be arriving). */
-function parseStream(text: string, done: boolean): { topic: string; points: string[]; error: string | null; heard: string } {
+function parseStream(text: string, done: boolean): { topic: string; points: string[]; error: string | null; heard: string; checking: boolean; latest: string } {
   const lines = text.split("\n");
   if (!done) lines.pop(); // incomplete
   let topic = "";
   let points: string[] = [];
   let error: string | null = null;
   let heard = "";
+  let search = "";
+  let latest = "";
+  let latestDone = false;
   for (const raw of lines.map((l) => l.trim())) {
     if (/^topic:/i.test(raw)) { topic = raw.replace(/^topic:\s*/i, ""); points = []; } // a new TOPIC replaces an earlier one
     else if (/^[-•*◆]\s*/.test(raw) && topic) points.push(raw.replace(/^[-•*◆]\s*/, ""));
     else if (/^error:/i.test(raw)) error = raw.replace(/^error:\s*/i, "");
     else if (/^heard:/i.test(raw)) heard = raw.replace(/^heard:\s*/i, "");
+    else if (/^search:/i.test(raw)) search = raw.replace(/^search:\s*/i, "");
+    else if (/^latest:/i.test(raw)) { latest = raw.replace(/^latest:\s*/i, ""); latestDone = true; }
   }
   if (/^none$/i.test(topic)) topic = "";
-  return { topic, points, error, heard };
+  if (/^none$/i.test(latest)) latest = "";
+  const checking = !done && !!search && !/^none$/i.test(search) && !latestDone;
+  return { topic, points, error, heard, checking, latest };
 }
 
 async function explain(typed?: string) {
@@ -847,7 +854,7 @@ async function explain(typed?: string) {
   st.listen = { ...st.listen, phase: "thinking", error: null };
   await render();
   // Wait for chunks already on their way to Groq, then add the few seconds not sent yet.
-  if (inflight.size) await Promise.race([Promise.allSettled([...inflight]), new Promise((r) => setTimeout(r, 4000))]);
+  if (inflight.size) await Promise.race([Promise.allSettled([...inflight]), new Promise((r) => setTimeout(r, 2000))]);
   if (id !== listenAsk) return;
   const form = new FormData();
   form.set("transcript", typed ?? transcript());
@@ -861,11 +868,13 @@ async function explain(typed?: string) {
     if (id !== listenAsk) return;
     const r = parseStream(text, done);
     if (!r.topic) return;
-    const key = `${r.topic}|${r.points.length}`;
+    const key = `${r.topic}|${r.points.length}|${r.checking}|${r.latest}`;
     if (key === shown) return;
     const first = !shown;
     shown = key;
-    st.listen = { ...st.listen, phase: "answer", topic: r.topic, lines: listenLines(r.points), page: st.listen.phase === "answer" ? st.listen.page : 0 };
+    // A fresh fact from the search goes on top, where it's seen without scrolling.
+    const lines = [...(r.latest ? listenLines([r.latest], "> LATEST: ") : []), ...listenLines(r.points)];
+    st.listen = { ...st.listen, phase: "answer", topic: r.topic, lines, checking: r.checking, page: st.listen.phase === "answer" ? st.listen.page : 0 };
     await render(first); // full redraw once for the topic tile, then just new points
   };
   try {
@@ -874,7 +883,7 @@ async function explain(typed?: string) {
     const r = parseStream(text, true);
     // The server transcribed the unsent seconds: keep them for the next tap.
     if (r.heard) segments.push({ seq: ++seq, end: Date.now(), text: r.heard });
-    if (r.error) st.listen = { ...st.listen, phase: "error", error: r.error };
+    if (r.error && !r.topic) st.listen = { ...st.listen, phase: "error", error: r.error };
     else if (!r.topic) st.listen = { ...st.listen, phase: "error", error: "Didn't hear enough to explain yet." };
     else { await show(text, true); return; }
   } catch (e) {

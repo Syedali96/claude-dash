@@ -111,6 +111,7 @@ export interface DashState {
     page: number;
     error: string | null;
     dot?: number; // which of the three listening dots is lit (animation step)
+    checking?: boolean; // answer shown, still searching the web for a fresh fact
   };
   gym: {
     sets: LoggedSet[];
@@ -634,9 +635,9 @@ function askBody(st: DashState): Body {
 export const LISTEN_SECONDS = 120; // how far back a tap looks
 
 /** Key points as "◆ ..." lines, wrapped under the topic tile. */
-export function listenLines(points: string[]): string[] {
+export function listenLines(points: string[], mark = "◆ "): string[] {
   const cols = colsFor(ANSWER.w, false);
-  return points.flatMap((p) => wrap(`◆ ${p}`, cols, "   "));
+  return points.flatMap((p) => wrap(`${mark}${p}`, cols, "   "));
 }
 
 export function listenPages(st: DashState): number {
@@ -647,7 +648,7 @@ export function listenPages(st: DashState): number {
 function listenGroups(st: DashState): string[][] {
   const out: string[][] = [];
   for (const l of st.listen.lines) {
-    if (l.startsWith("◆") || !out.length) out.push([l]);
+    if (l.startsWith("◆") || l.startsWith(">") || !out.length) out.push([l]);
     else out[out.length - 1].push(l);
   }
   return out;
@@ -754,7 +755,9 @@ export const CARDS: Record<CardId, CardDef> = {
       if (l.phase === "answer") {
         const n = listenPages(st);
         const more = l.page + 1 < n;
-        return `${n > 1 ? `${l.page + 1}/${n}   ` : ""}${more ? "tap  more   2x  back" : "tap  back"}`;
+        const page = n > 1 ? `${l.page + 1}/${n}   ` : "";
+        if (l.checking) return `${page}checking latest...`;
+        return `${page}${more ? "tap  more   2x  back" : "tap  back"}`;
       }
       if (l.phase === "error") return "tap  back   2x  stop";
       return "";
