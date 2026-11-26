@@ -9,5 +9,7 @@
     // `npx wrangler kv namespace create TOKENS` (see SETUP.md).
     { "binding": "TOKENS", "id": "81da1729f8494253b7cd0034e16c29b0" }
   ],
+  // Keeps the inbox, news and WHOOP ready so the glasses never wait (worker/index.ts "scheduled").
+  "triggers": { "crons": ["*/15 * * * *"] },
   "observability": { "enabled": true }
 }

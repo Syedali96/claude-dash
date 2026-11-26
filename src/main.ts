@@ -8,11 +8,11 @@ import {
   waitForEvenAppBridge,
 } from "@evenrealities/even_hub_sdk";
 import { ApiError, api, apiStream } from "./api";
-import { alertFrame, alertPages, askPages, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
+import { alertFrame, alertPages, askPages, LISTEN_DOT_MS, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
 import { drawBlank, drawFrame, type Frame, MENU, shapeChanged, updateRegion, updateTile } from "./layout";
 import { canonicalName, exerciseKey, nextTip } from "./exercises";
 import { mountPhoneUI } from "./phone";
-import { type LoggedSet, loadGym, loadSettings, saveGym, saveSettings } from "./settings";
+import { type LoggedSet, loadGym, loadSettings, loadSnapshot, saveGym, saveSettings, saveSnapshot } from "./settings";
 
 type Gesture = "next" | "prev" | "tap" | "double" | "long";
 
@@ -35,6 +35,7 @@ const st: DashState = {
   agenda: { events: null, loading: false, error: null, notConnected: false },
   inbox: { data: null, loading: false, error: null, page: 0 },
   whoop: null,
+  saved: {},
   briefPage: 0,
   ask: { phase: "ready", followUp: false, question: "", lines: [], page: 0, history: [], error: null },
   listen: { phase: "off", topic: "", lines: [], page: 0, error: null },
@@ -54,12 +55,23 @@ function frame(): Frame {
   return { ...header(st, current, battery), body, ...footer(st, current) };
 }
 
-/** Redraw what changed. Full rebuild only when the card itself changes. */
-async function render(full = false) {
+/** How many text boxes differ between two frames with the same layout. */
+function changes(a: Frame, b: Frame): number {
+  let n = 0;
+  for (const k of ["title", "status", "dots", "hint"] as const) if (a[k] !== b[k]) n++;
+  b.body.tiles.forEach((t, i) => { if (t.text !== a.body.tiles[i]?.text) n++; });
+  return n;
+}
+
+/**
+ * Redraw what changed. Swapping a few texts in place is quicker and doesn't flicker; a full
+ * rebuild is only for a new layout, lots of changes at once (like a new card), or `force`.
+ */
+async function render(force = false) {
   const f = frame();
   phone.preview(f);
   if (!bridge || asleep) return;
-  if (full || !lastFrame || shapeChanged(lastFrame, f)) {
+  if (force || !lastFrame || shapeChanged(lastFrame, f) || changes(lastFrame, f) > 3) {
     await drawFrame(bridge, f, st.settings);
   } else {
     if (f.title !== lastFrame.title) await updateRegion(bridge, "title", f.title);
@@ -74,6 +86,38 @@ async function render(full = false) {
 }
 
 // ---------- data ----------
+
+// The last data each card showed, saved on the phone so the next launch can show it at once.
+interface Snapshot {
+  agenda?: { at: number; events: AgendaEvent[] };
+  news?: { at: number; headlines: string[] };
+  markets?: Markets;
+  inbox?: { at: number; data: InboxData };
+  whoop?: WhoopToday;
+  brief?: { at: number; text: string };
+  weather?: string;
+}
+let snap: Snapshot = {};
+let snapTimer: ReturnType<typeof setTimeout> | undefined;
+
+function remember(part: Partial<Snapshot>) {
+  snap = { ...snap, ...part };
+  clearTimeout(snapTimer);
+  snapTimer = setTimeout(() => saveSnapshot(bridge, snap), 3000); // one write for a burst of refreshes
+}
+
+/** Show last launch's data straight away (each card refreshes right after). */
+function restore(s: Snapshot | null) {
+  if (!s) return;
+  snap = s;
+  if (s.agenda) { st.agenda.events = s.agenda.events; st.saved.agenda = s.agenda.at; }
+  if (s.news) { st.news = s.news.headlines; st.saved.news = s.news.at; }
+  if (s.markets) st.markets = s.markets;
+  if (s.inbox) { st.inbox.data = s.inbox.data; st.saved.inbox = s.inbox.at; }
+  if (s.whoop) { st.whoop = s.whoop; st.gym.recovery = s.whoop.recovery; }
+  if (s.brief) st.brief = { text: s.brief.text, at: new Date(s.brief.at), loading: false, error: null };
+  if (s.weather) st.weather = s.weather;
+}
 
 const WMO: Record<number, string> = {
   0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast", 45: "fog", 48: "fog",
@@ -96,6 +140,7 @@ async function refreshWeather() {
     const data = (await (await fetch(url)).json()) as { current: { temperature_2m: number; weather_code: number } };
     const t = Math.round(data.current.temperature_2m);
     st.weather = `${t}°F · ${WMO[data.current.weather_code] ?? "—"}`;
+    remember({ weather: st.weather });
     await render();
   } catch (e) {
     console.warn("weather failed", e);
@@ -133,6 +178,8 @@ async function refreshAgenda() {
     const q = new URLSearchParams({ start: start.toISOString(), end: end.toISOString() });
     const data = await api<{ events: AgendaEvent[] }>(st.settings, `/api/agenda?${q}`);
     st.agenda = { events: data.events, loading: false, error: null, notConnected: false };
+    delete st.saved.agenda;
+    remember({ agenda: { at: Date.now(), events: data.events } });
   } catch (e) {
     const notConnected = e instanceof ApiError && e.code === "not_connected";
     st.agenda = { ...st.agenda, loading: false, notConnected, error: e instanceof Error ? e.message : "Calendar error" };
@@ -168,6 +215,8 @@ async function refreshInbox() {
   try {
     const data = await api<InboxData>(st.settings, "/api/inbox");
     st.inbox = { ...st.inbox, data, loading: false, error: null };
+    delete st.saved.inbox;
+    remember({ inbox: { at: Date.now(), data } });
   } catch (e) {
     st.inbox = { ...st.inbox, loading: false, error: e instanceof Error ? e.message : "Inbox error" };
   }
@@ -179,6 +228,7 @@ async function refreshWhoop() {
     const tz = encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone);
     st.whoop = await api<WhoopToday>(st.settings, `/api/whoop?tz=${tz}`);
     st.gym.recovery = st.whoop.recovery;
+    remember({ whoop: st.whoop });
     await render();
   } catch {
     /* not connected yet: rest timer uses your base time */
@@ -194,6 +244,7 @@ function todayRange() {
 async function refreshMarkets() {
   try {
     st.markets = await api<Markets>(st.settings, "/api/markets");
+    remember({ markets: st.markets });
     await render();
   } catch {
     /* keep the last snapshot */
@@ -222,7 +273,7 @@ async function pollAlerts() {
     if (!st.alertView) st.alertView = { list: [...fresh], index: 0, expanded: false, page: 0, closeAt: Date.now() + POPUP_MS };
     lastInput = Date.now();
     if (asleep) asleep = false;
-    await render(true);
+    await render();
   } catch {
     /* try again next time */
   }
@@ -236,7 +287,7 @@ function closeAlerts() {
     st.alerts = st.alerts.filter((a) => !read.has(a.id));
   }
   st.alertView = null;
-  return render(true);
+  return render();
 }
 
 /** Gestures while a pop-up is showing. Returns true when it handled the gesture. */
@@ -266,6 +317,8 @@ async function refreshNews() {
   try {
     st.news = (await api<{ headlines: string[] }>(st.settings, "/api/news")).headlines;
     st.newsCursor = Math.min(st.newsCursor, Math.max(0, st.news.length - 1));
+    delete st.saved.news;
+    remember({ news: { at: Date.now(), headlines: st.news } });
     await render();
   } catch {
     /* keep the last headlines */
@@ -288,9 +341,13 @@ async function openStory() {
   await render();
 }
 
+let briefBusy = false;
+
 async function refreshBrief() {
-  if (st.brief.loading) return;
-  st.brief = { ...st.brief, loading: true, error: null };
+  if (briefBusy) return;
+  briefBusy = true;
+  // With a plan already on screen, make the new one quietly in the background.
+  st.brief = { ...st.brief, loading: !st.brief.text, error: null };
   await render();
   try {
     const data = await api<{ text?: string }>(st.settings, "/api/brief", {
@@ -309,9 +366,11 @@ async function refreshBrief() {
     if (!data.text) throw new Error("Claude returned an empty brief.");
     st.brief = { text: data.text, at: new Date(), loading: false, error: null };
     st.briefPage = 0;
+    remember({ brief: { at: Date.now(), text: data.text } });
   } catch (e) {
     st.brief = { ...st.brief, loading: false, error: e instanceof Error ? e.message : "Could not reach Claude." };
   }
+  briefBusy = false;
   await render();
 }
 
@@ -360,20 +419,18 @@ async function stopRecording() {
 
   try {
     const today = sessionSets(st);
-    const res = await api<{ text: string; command: GymCommand }>(st.settings, "/api/gym/command", {
-      method: "POST",
-      body: JSON.stringify({
-        audio: toBase64(audio),
-        today: today.map(({ exercise, weight, unit, reps }) => ({ exercise, weight, unit, reps })),
-        known: knownExercises(),
-      }),
-    });
+    // Raw audio bytes (about a third smaller than base64 text).
+    const form = new FormData();
+    form.set("audio", new Blob([audio], { type: "application/octet-stream" }), "set.pcm");
+    form.set("today", JSON.stringify(today.map(({ exercise, weight, unit, reps }) => ({ exercise, weight, unit, reps }))));
+    form.set("known", JSON.stringify(knownExercises()));
+    const res = await api<{ text: string; command: GymCommand }>(st.settings, "/api/gym/command", { method: "POST", body: form });
     await runGymCommand(res.command, res.text, today);
   } catch (e) {
     st.gym.message = e instanceof Error ? e.message : "Couldn't log that set.";
   }
   st.gym.busy = false;
-  await render(true);
+  await render();
 }
 
 type GymCommand =
@@ -483,7 +540,7 @@ async function closeSummary() {
   if (!st.gym.summary) return;
   st.gym.sessionStart = st.gym.summary.end + 1; // later sets start a new workout
   st.gym.summary = null;
-  await render(true);
+  await render();
 }
 
 async function logSet(heard: Omit<LoggedSet, "t">) {
@@ -533,15 +590,11 @@ async function gymDevTest() {
   if (q.has("gymtest") && i >= 0) current = i;
   // ?asktest=q1|q2 asks typed questions in one chat (each keeps the earlier ones as context).
   for (const text of (q.get("asktest") ?? "").split("|").filter(Boolean)) {
-    const res = await api<{ question: string; answer: string }>(st.settings, "/api/ask", {
-      method: "POST",
-      body: JSON.stringify({ text, history: st.ask.history, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
-    });
-    st.ask = { ...st.ask, phase: "answer", question: res.question, lines: storyLines(res.answer), page: 0,
-      history: [...st.ask.history, { q: res.question, a: res.answer }].slice(-6) };
     current = st.settings.cards.indexOf("ask");
+    st.ask = { ...st.ask, phase: "thinking" };
+    await askStream({ text });
   }
-  await render(true);
+  await render();
 }
 
 // ---------- ask claude (voice) ----------
@@ -549,27 +602,21 @@ async function gymDevTest() {
 const ASK_MAX_MS = 15_000;
 let askTimer: ReturnType<typeof setTimeout> | undefined;
 
-function toBase64(bytes: Uint8Array): string {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(bin);
-}
-
 async function startAsk(followUp: boolean) {
   if (!bridge) {
     st.ask = { ...st.ask, phase: "error", error: "Asking by voice works on the glasses." };
-    return render(true);
+    return render();
   }
   pcm = [];
   const ok = await bridge.audioControl(true, AudioInputSource.Glasses).catch(() => false);
   if (!ok) {
     st.ask = { ...st.ask, phase: "error", error: "Mic didn't start." };
-    return render(true);
+    return render();
   }
   if (!followUp) st.ask.history = [];
   st.ask = { ...st.ask, phase: "listening", followUp, page: 0, error: null };
   askTimer = setTimeout(stopAsk, ASK_MAX_MS);
-  await render(true);
+  await render();
 }
 
 async function cancelAsk() {
@@ -589,32 +636,64 @@ async function stopAsk() {
   for (const c of pcm) { audio.set(c, at); at += c.length; }
   pcm = [];
   st.ask = { ...st.ask, phase: "thinking", question: "" };
-  await render(true);
+  await render();
+  await askStream({ audio });
+}
+
+/**
+ * Send the question and show the answer as it's written: the question you asked appears
+ * first, then the answer fills in. "\x1e" in the stream means Claude went to look something
+ * up, so the text before it was only a note and is dropped.
+ */
+async function askStream(q: { audio?: Uint8Array; text?: string }) {
+  const form = new FormData();
+  if (q.audio) form.set("audio", new Blob([q.audio], { type: "application/octet-stream" }), "ask.pcm");
+  if (q.text) form.set("text", q.text);
+  form.set("history", JSON.stringify(st.ask.history));
+  form.set("now", new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
+  form.set("timeZone", Intl.DateTimeFormat().resolvedOptions().timeZone);
+  const parse = (text: string) => {
+    const nl = text.indexOf("\n");
+    const question = nl < 0 ? "" : text.slice(0, nl).replace(/^QUESTION:\s*/, "").trim();
+    let rest = nl < 0 ? "" : text.slice(nl + 1);
+    let error: string | null = null;
+    const err = rest.match(/\nERROR: (.*)$/);
+    if (err) { error = err[1]; rest = rest.slice(0, err.index); }
+    return { headerDone: nl >= 0, question, answer: rest.slice(rest.lastIndexOf("\x1e") + 1).trim(), error };
+  };
+  let shown = "";
+  const show = (text: string) => {
+    const r = parse(text);
+    if (!r.headerDone || !r.question) return;
+    // Only redraw when a whole word arrived, so the glasses aren't flooded with updates.
+    const visible = r.answer.replace(/\S*$/, "");
+    const key = `${r.question}|${visible}`;
+    if (key === shown || st.ask.phase === "listening") return;
+    shown = key;
+    st.ask = { ...st.ask, phase: "answer", streaming: true, question: r.question, lines: storyLines(visible || "..."), page: 0 };
+    render();
+  };
   try {
-    const res = await api<{ question: string; answer: string }>(st.settings, "/api/ask", {
-      method: "POST",
-      body: JSON.stringify({
-        audio: toBase64(audio),
-        history: st.ask.history,
-        now: new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }),
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      }),
-    });
-    if (!res.question) st.ask = { ...st.ask, phase: "error", error: "Didn't catch that." };
+    const text = await apiStream(st.settings, "/api/ask", { method: "POST", body: form }, show);
+    const r = parse(text);
+    st.ask.streaming = false;
+    if (st.ask.phase === "listening") return; // you started a new question meanwhile
+    if (!r.question) st.ask = { ...st.ask, phase: "error", error: "Didn't catch that." };
+    else if (r.error && !r.answer) st.ask = { ...st.ask, phase: "error", error: r.error };
     else {
       st.ask = {
         ...st.ask,
         phase: "answer",
-        question: res.question,
-        lines: storyLines(res.answer),
+        question: r.question,
+        lines: storyLines(r.answer),
         page: 0,
-        history: [...st.ask.history, { q: res.question, a: res.answer }].slice(-6),
+        history: [...st.ask.history, { q: r.question, a: r.answer }].slice(-6),
       };
     }
   } catch (e) {
-    st.ask = { ...st.ask, phase: "error", error: e instanceof Error ? e.message : "Couldn't reach Claude." };
+    st.ask = { ...st.ask, phase: "error", streaming: false, error: e instanceof Error ? e.message : "Couldn't reach Claude." };
   }
-  await render(true);
+  await render();
 }
 
 // ---------- listen: transcribe as you talk, explain on tap ----------
@@ -713,17 +792,17 @@ function resetListen() {
 async function startListen() {
   if (!bridge) {
     st.listen = { ...st.listen, phase: "error", error: "Listening works on the glasses." };
-    return render(true);
+    return render();
   }
   resetListen();
   const ok = await bridge.audioControl(true, AudioInputSource.Glasses).catch(() => false);
   if (!ok) {
     st.listen = { ...st.listen, phase: "error", error: "Mic didn't start." };
-    return render(true);
+    return render();
   }
   st.listen = { phase: "listening", topic: "", lines: [], page: 0, error: null };
   chunkTimer = setInterval(sendChunk, CHUNK_MS);
-  await render(true);
+  await render();
 }
 
 /** Mic off and everything (audio and text) thrown away. */
@@ -741,7 +820,7 @@ function backToDots() {
   listenAsk++;
   listenAbort?.abort();
   st.listen = { phase: "listening", topic: "", lines: [], page: 0, error: null };
-  return render(true);
+  return render();
 }
 
 /** "TOPIC: X\n- a\n- b" so far → topic and finished points (the last line may still be arriving). */
@@ -766,7 +845,7 @@ async function explain(typed?: string) {
   const id = ++listenAsk;
   listenAbort = new AbortController();
   st.listen = { ...st.listen, phase: "thinking", error: null };
-  await render(true);
+  await render();
   // Wait for chunks already on their way to Groq, then add the few seconds not sent yet.
   if (inflight.size) await Promise.race([Promise.allSettled([...inflight]), new Promise((r) => setTimeout(r, 4000))]);
   if (id !== listenAsk) return;
@@ -802,7 +881,14 @@ async function explain(typed?: string) {
     if (id !== listenAsk) return;
     st.listen = { ...st.listen, phase: "error", error: e instanceof Error ? e.message : "Couldn't reach Claude." };
   }
-  await render(true);
+  await render();
+}
+
+/** Testing only (npm run dev): ?savedtest pretends the cards are showing 40-minute-old saved data. */
+function savedDevTest() {
+  if (!import.meta.env.DEV || !new URLSearchParams(location.search).has("savedtest")) return;
+  const at = Date.now() - 40 * 60_000;
+  st.saved = { agenda: at, news: at, inbox: at };
 }
 
 /** Testing only (npm run dev): ?listentest=<transcript> shows the answer; ?listentest=dots shows the listening screen. */
@@ -843,7 +929,7 @@ async function onTap() {
   if (id === "agenda") {
     st.agendaPage = (st.agendaPage + 1) % TODAY_PAGES;
     if (st.agendaPage === 0) refreshAgenda();
-    return render(true);
+    return render();
   }
   if (id === "news") {
     if (st.reader) {
@@ -862,7 +948,7 @@ async function onTap() {
   if (id === "ask") {
     const a = st.ask;
     if (a.phase === "listening") return stopAsk();
-    if (a.phase === "thinking") return;
+    if (a.phase === "thinking" || a.streaming) return; // wait for the whole answer
     if (a.phase === "answer" && a.page + 1 < askPages(st)) { a.page++; return render(); }
     return startAsk(a.history.length > 0); // keeps the conversation going; 2x starts fresh
   }
@@ -871,7 +957,7 @@ async function onTap() {
     if (l.phase === "off") return startListen();
     if (l.phase === "listening") return explain();
     if (l.phase === "answer" && l.page + 1 < listenPages(st)) { l.page++; return render(); }
-    if (l.phase === "answer" || l.phase === "error") return bridge ? backToDots() : stopListen().then(() => render(true));
+    if (l.phase === "answer" || l.phase === "error") return bridge ? backToDots() : stopListen().then(() => render());
     return; // thinking
   }
   if (id === "gym") {
@@ -932,14 +1018,14 @@ async function handle(g: Gesture) {
   if ((g === "next" || g === "prev") && card === "listen") await stopListen();
   // Listen: double tap goes back to the dots, or stops listening from the dots.
   if (g === "double" && card === "listen" && st.listen.phase !== "off") {
-    if (st.listen.phase === "listening" || st.listen.phase === "error") { await stopListen(); return render(true); }
+    if (st.listen.phase === "listening" || st.listen.phase === "error") { await stopListen(); return render(); }
     return backToDots();
   }
   // Ask: double tap starts a new chat (forgets the conversation).
   if (g === "double" && card === "ask") {
-    if (st.ask.phase === "listening" || st.ask.phase === "thinking") return;
+    if (st.ask.phase === "listening" || st.ask.phase === "thinking" || st.ask.streaming) return;
     st.ask = { ...st.ask, phase: "ready", followUp: false, question: "", lines: [], page: 0, history: [], error: null };
-    return render(true);
+    return render();
   }
   // Day plan: double tap makes a new plan.
   if (g === "double" && card === "brief") return refreshBrief();
@@ -951,11 +1037,11 @@ async function handle(g: Gesture) {
   // Today: double tap opens the new emails behind the [N new] badge.
   if (g === "double" && card === "agenda" && st.alerts.length) {
     st.alertView = { list: [...st.alerts], index: 0, expanded: true, page: 0, closeAt: null };
-    return render(true);
+    return render();
   }
-  if (g === "next") { current = (current + 1) % n; return render(true); }
-  if (g === "prev") { current = (current - 1 + n) % n; return render(true); }
-  if (g === "double") { current = 0; st.agendaPage = 0; return render(true); }
+  if (g === "next") { current = (current + 1) % n; return render(); }
+  if (g === "prev") { current = (current - 1 + n) % n; return render(); }
+  if (g === "double") { current = 0; st.agendaPage = 0; return render(); }
   return onTap();
 }
 
@@ -967,7 +1053,7 @@ const phone = mountPhoneUI(st.settings, {
     st.settings = s;
     current = Math.min(current, s.cards.length - 1);
     await saveSettings(bridge, s);
-    await render(true);
+    await render(true); // brightness or layout settings may have changed
     if (serverChanged) { refreshAgenda(); refreshInbox(); refreshWhoop(); refreshBrief(); }
   },
   onGesture: (g) => handle(g),
@@ -994,8 +1080,8 @@ async function boot() {
   phone.setConnected(!!bridge);
 
   if (bridge) {
-    st.settings = await loadSettings(bridge);
-    st.gym.sets = await loadGym(bridge);
+    [st.settings, st.gym.sets] = await Promise.all([loadSettings(bridge), loadGym(bridge)]);
+    restore(await loadSnapshot<Snapshot>(bridge));
     phone.sync(st.settings);
     phone.showGym(st.gym.sets);
     bridge.onEvenHubEvent(async (ev) => {
@@ -1008,7 +1094,7 @@ async function boot() {
         const id = ev.menuItemClickEvent.itemID;
         if (id === MENU.refresh) {
           const i = st.settings.cards.indexOf("brief");
-          if (i >= 0) { current = i; await render(true); }
+          if (i >= 0) { current = i; await render(); }
           await refreshBrief();
         }
         if (id === MENU.home) await handle("double");
@@ -1026,11 +1112,13 @@ async function boot() {
     });
   }
 
+  if (!bridge) restore(await loadSnapshot<Snapshot>(null));
   phone.showGym(st.gym.sets);
   await gymDevTest();
   await listenDevTest();
+  savedDevTest();
   if (!st.settings.cards.length) st.settings.cards = ["agenda"];
-  await render(true);
+  await render();
   refreshWeather();
   refreshWhoop();
   if (st.settings.cards.includes("agenda")) refreshAgenda();
@@ -1040,7 +1128,17 @@ async function boot() {
     pollAlerts();
   }
   if (st.settings.cards.includes("inbox")) refreshInbox();
-  if (st.settings.cards.includes("brief")) refreshBrief();
+  // The day plan is remade every 2 hours anyway, so a recent one from last launch is kept.
+  const BRIEF_EVERY_MS = 2 * 60 * 60_000;
+  if (st.settings.cards.includes("brief") && (!st.brief.at || Date.now() - st.brief.at.getTime() > BRIEF_EVERY_MS)) refreshBrief();
+
+  // Listen: step the three dots while only the dots are on screen (one small text update each time).
+  setInterval(() => {
+    const showing = st.settings.cards[current] === "listen" && st.listen.phase === "listening" && !st.alertView && !asleep;
+    if (!showing) return;
+    st.listen.dot = ((st.listen.dot ?? 0) + 1) % 3;
+    render();
+  }, LISTEN_DOT_MS);
 
   // Tick: clock every minute, gym rest timer every second while it runs.
   let lastMinute = -1;
@@ -1061,7 +1159,7 @@ async function boot() {
   setInterval(refreshInbox, 15 * 60_000);
   setInterval(refreshWhoop, 20 * 60_000);
   setInterval(refreshNews, 15 * 60_000); // the server only re-picks when the feeds have new stories
-  setInterval(refreshBrief, 2 * 60 * 60_000); // keep the day plan current
+  setInterval(refreshBrief, BRIEF_EVERY_MS); // keep the day plan current
   setInterval(refreshMarkets, 5 * 60_000);
   setInterval(pollAlerts, ALERT_EVERY_MS);
 }

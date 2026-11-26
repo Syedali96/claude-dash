@@ -92,6 +92,7 @@ export interface DashState {
   reader: Reader | null; // an open news story
   inbox: { data: InboxData | null; loading: boolean; error: string | null; page: number };
   whoop: WhoopToday | null;
+  saved: Partial<Record<CardId, number>>; // cards still showing last launch's data: when it was fetched (ms)
   ask: {
     phase: "ready" | "listening" | "thinking" | "answer" | "error";
     followUp: boolean;
@@ -100,6 +101,7 @@ export interface DashState {
     page: number;
     history: { q: string; a: string }[];
     error: string | null;
+    streaming?: boolean; // the answer is still arriving
   };
   listen: {
     // off: not listening. listening: only the dots. thinking/answer/error: the mic keeps going underneath.
@@ -108,6 +110,7 @@ export interface DashState {
     lines: string[]; // the key points, wrapped
     page: number;
     error: string | null;
+    dot?: number; // which of the three listening dots is lit (animation step)
   };
   gym: {
     sets: LoggedSet[];
@@ -650,11 +653,17 @@ function listenGroups(st: DashState): string[][] {
   return out;
 }
 
+/** Small "thinking" dots: one is lit at a time and it moves left to right, like Claude's working dots. */
+export const LISTEN_DOT_MS = 500;
+export function listenDots(step: number): string {
+  return [0, 1, 2].map((i) => (i === step % 3 ? "•" : "·")).join("  ");
+}
+
 function listenBody(st: DashState): Body {
   const l = st.listen;
   switch (l.phase) {
     case "listening":
-      return { tiles: [box(240, 80, 96, 40, ["●  ●  ●"], { border: false, dim: true, capture: true })] };
+      return { tiles: [box(268, 80, 80, 40, [listenDots(l.dot ?? 0)], { border: false, dim: true, capture: true })] };
     case "thinking":
       return { tiles: [box(ANSWER.x, 2, ANSWER.w, 196, ["Looking into it..."], { border: false, capture: true })] };
     case "answer": {
@@ -726,7 +735,7 @@ export const CARDS: Record<CardId, CardDef> = {
     tapHint: (st) => {
       const a = st.ask;
       if (a.phase === "listening") return "tap  done";
-      if (a.phase === "thinking") return "";
+      if (a.phase === "thinking" || a.streaming) return "";
       if (a.phase === "answer") {
         const n = askPages(st);
         const more = a.page + 1 < n;
@@ -769,6 +778,8 @@ export const CARDS: Record<CardId, CardDef> = {
   },
 };
 
+const SAVED_LABEL_MS = 5 * 60_000; // younger saved data needs no label
+
 /** Footer: page dots on the left, a short dim hint on the right. */
 export function footer(st: DashState, current: number): { dots: string; hint: string } {
   // On the Listen card, "● ● ●" in the corner means the mic is still on.
@@ -776,7 +787,11 @@ export function footer(st: DashState, current: number): { dots: string; hint: st
   const dots = listening ? "● ● ●" : st.settings.cards.map((_, i) => (i === current ? "●" : "○")).join(" ");
   if (!st.settings.showHints) return { dots, hint: "" };
   const alert = alertFrame(st);
-  return { dots, hint: alert ? alert.hint : CARDS[st.settings.cards[current]].tapHint(st) };
+  if (alert) return { dots, hint: alert.hint };
+  // Last launch's data, still refreshing (or offline): say how old it is instead of the hint.
+  const saved = st.saved[st.settings.cards[current]];
+  if (saved && st.now.getTime() - saved > SAVED_LABEL_MS) return { dots, hint: `updated ${clock(new Date(saved), st.settings.use24h)}` };
+  return { dots, hint: CARDS[st.settings.cards[current]].tapHint(st) };
 }
 
 /** Header: card title on the left, time + battery on the right. */

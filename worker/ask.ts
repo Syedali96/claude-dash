@@ -6,6 +6,7 @@ import { betaTool } from "@anthropic-ai/sdk/helpers/beta/json-schema";
 import { inbox } from "./gmail";
 import { ACCOUNTS, type AccountKey, accessToken, agenda } from "./google";
 import { transcribe } from "./gym";
+import type { Ctx } from "./cache";
 import type { Env } from "./index";
 import { news } from "./news";
 import { bedtime, whoopText, whoopToday } from "./whoop";
@@ -94,15 +95,38 @@ beyond the headlines), use web_search. Don't add source links; the display can't
 (from:paul, subject:TAP, newer_than:7d). You can only read: if asked to send, reply, delete
 or change anything, say you can't do that from the glasses yet.`;
 
-export async function ask(req: Request, env: Env): Promise<Response> {
-  const body = (await req.json()) as AskRequest;
+/**
+ * Two ways in:
+ * - multipart form (current app): fields audio (raw PCM file) or text, history (JSON), now, timeZone.
+ *   Streams plain text: "QUESTION: ...\n" then the answer as it's written. A \x1e character means
+ *   "throw away the answer text so far" (Claude is about to look something up).
+ * - JSON (older app versions): {audio: base64, ...} and a JSON reply when done.
+ */
+export async function ask(req: Request, env: Env, ctx?: Ctx): Promise<Response> {
+  const streaming = (req.headers.get("Content-Type") ?? "").startsWith("multipart/form-data");
+  let body: AskRequest;
+  let pcm: Uint8Array | null = null;
+  if (streaming) {
+    const form = await req.formData();
+    const audio = form.get("audio");
+    if (audio && typeof audio !== "string") pcm = new Uint8Array(await audio.arrayBuffer());
+    body = {
+      text: String(form.get("text") ?? ""),
+      history: JSON.parse(String(form.get("history") || "[]")) as AskRequest["history"],
+      now: String(form.get("now") ?? "") || undefined,
+      timeZone: String(form.get("timeZone") ?? "") || undefined,
+    };
+  } else {
+    body = (await req.json()) as AskRequest;
+    if (body.audio) pcm = Uint8Array.from(atob(body.audio), (c) => c.charCodeAt(0));
+  }
+  const empty = () => (streaming ? plain("QUESTION: \n") : Response.json({ question: "", answer: "" }));
   let question = body.text?.trim() ?? "";
-  if (!question && body.audio) {
-    const pcm = Uint8Array.from(atob(body.audio), (c) => c.charCodeAt(0));
-    if (pcm.length < 16_000 * 2 * 0.4) return Response.json({ question: "", answer: "" });
+  if (!question && pcm) {
+    if (pcm.length < 16_000 * 2 * 0.4) return empty();
     question = await transcribe(env, pcm, "A question for an assistant about email, meetings, health, news.");
   }
-  if (!question) return Response.json({ question: "", answer: "" });
+  if (!question) return empty();
 
   const tz = body.timeZone || "America/New_York";
   let searches = 0;
@@ -137,7 +161,7 @@ export async function ask(req: Request, env: Env): Promise<Response> {
       description: "Today's WHOOP recovery, HRV, sleep, strain and recommended bedtime.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       run: async () => {
-        const w = await whoopToday(env);
+        const w = await whoopToday(env, ctx);
         return w ? `${whoopText(w)}. Recommended bedtime ${bedtime(w, tz).bedtime}.` : "WHOOP not connected.";
       },
     }),
@@ -152,7 +176,7 @@ export async function ask(req: Request, env: Env): Promise<Response> {
       description: "Emails waiting on the user's reply and emails they sent that got no answer (already triaged).",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       run: async () => {
-        const ib = await inbox(env, false);
+        const ib = await inbox(env, false, ctx);
         return JSON.stringify({ reply: ib.reply.map((i) => i.line), followup: ib.followup.map((i) => i.line) });
       },
     }),
@@ -160,7 +184,7 @@ export async function ask(req: Request, env: Env): Promise<Response> {
       name: "get_news",
       description: "Today's top headlines (Morning Brew and Tech Brew).",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      run: async () => (await news(env)).headlines.join("\n"),
+      run: async () => (await news(env, ctx)).headlines.join("\n"),
     }),
   ];
 
@@ -174,20 +198,62 @@ export async function ask(req: Request, env: Env): Promise<Response> {
   messages.push({ role: "user", content: `(Now: ${body.now ?? new Date().toISOString()}, time zone ${tz})\n${question}` });
 
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  const final = await client.beta.messages.toolRunner({
+  const params = {
     model: "claude-opus-5-5",
     max_tokens: 4000,
     max_iterations: 5,
-    output_config: { effort: "low" },
+    output_config: { effort: "low" as const },
     betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
+    fallbacks: "default" as const,
     system: SYSTEM,
     tools: [...tools, webSearch],
     messages,
-  });
-  if (final.stop_reason === "refusal") return Response.json({ question, answer: "I can't help with that one." });
-  // Keep only the text after the last search, so notes Claude made before searching aren't shown.
-  const lastTool = final.content.map((b) => b.type !== "text").lastIndexOf(true);
-  const answer = final.content.slice(lastTool + 1).flatMap((b) => (b.type === "text" ? [b.text] : [])).join("").trim();
-  return Response.json({ question, answer: answer || "I couldn't find an answer to that." });
+  };
+
+  if (!streaming) {
+    const final = await client.beta.messages.toolRunner(params);
+    if (final.stop_reason === "refusal") return Response.json({ question, answer: "I can't help with that one." });
+    // Keep only the text after the last search, so notes Claude made before searching aren't shown.
+    const lastTool = final.content.map((b) => b.type !== "text").lastIndexOf(true);
+    const answer = final.content.slice(lastTool + 1).flatMap((b) => (b.type === "text" ? [b.text] : [])).join("").trim();
+    return Response.json({ question, answer: answer || "I couldn't find an answer to that." });
+  }
+
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  const enc = new TextEncoder();
+  const write = (t: string) => writer.write(enc.encode(t));
+  const job = (async () => {
+    let wrote = false; // any answer text since the last lookup
+    let refused = false;
+    try {
+      await write(`QUESTION: ${question.replace(/\s+/g, " ")}\n`);
+      const runner = client.beta.messages.toolRunner({ ...params, stream: true, runToolsEagerly: true });
+      for await (const stream of runner) {
+        for await (const ev of stream) {
+          if (ev.type === "content_block_start" && ev.content_block.type !== "text") {
+            if (wrote) await write("\x1e");
+            wrote = false;
+          } else if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
+            await write(ev.delta.text);
+            if (ev.delta.text.trim()) wrote = true;
+          } else if (ev.type === "message_delta" && ev.delta.stop_reason === "refusal") refused = true;
+        }
+      }
+      if (refused) await write("\x1eI can't help with that one.");
+      else if (!wrote) await write("\x1eI couldn't find an answer to that.");
+    } catch (e) {
+      await write(`\nERROR: ${e instanceof Error ? e.message : "Claude error"}`).catch(() => {});
+    } finally {
+      await writer.close().catch(() => {});
+    }
+  })();
+  ctx?.waitUntil(job);
+  return plain(readable);
 }
+
+const plain = (body: BodyInit) =>
+  new Response(body, {
+    // identity: compressing would hold the text back until the end instead of streaming it
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache", "Content-Encoding": "identity" },
+  });

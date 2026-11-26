@@ -86,5 +86,6 @@ export async function listen(req: Request, env: Env): Promise<Response> {
       await writer.close().catch(() => {});
     }
   })();
-  return new Response(readable, { headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" } });
+  // identity: compressing would hold the text back until the end instead of streaming it
+  return new Response(readable, { headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache", "Content-Encoding": "identity" } });
 }

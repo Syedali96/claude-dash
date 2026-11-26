@@ -42,7 +42,7 @@ function authorized(req: Request, url: URL, env: Env): boolean {
 }
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 
@@ -68,7 +68,7 @@ export default {
           if (!env.WHOOP_CLIENT_ID) return json({ error: "WHOOP client ID missing on the server." }, 500);
           return startWhoop(env, url.origin);
         case "/api/whoop": {
-          const w = await whoopToday(env);
+          const w = await whoopToday(env, ctx);
           if (!w) return json({ error: "not_connected" }, 409);
           const tz = url.searchParams.get("tz") || "America/New_York";
           return json({ ...w, ...bedtime(w, tz), tip: w.recovery != null ? await whoopTip(env, w).catch(() => "") : "" });
@@ -91,12 +91,16 @@ export default {
         }
         case "/api/inbox":
           if (!env.ANTHROPIC_API_KEY) return json({ error: "Claude key missing on the server." }, 500);
-          return json(await inbox(env, url.searchParams.has("fresh")));
+          return json(await inbox(env, url.searchParams.has("fresh"), ctx));
         case "/api/news":
-          return json(await news(env));
+          return json(await news(env, ctx));
         case "/api/ask":
           if (req.method !== "POST") return json({ error: "POST only" }, 405);
-          return ask(req, env).then((r) => new Response(r.body, { status: r.status, headers: { "Content-Type": "application/json", ...CORS } }));
+          return ask(req, env, ctx).then((r) => {
+            const headers = new Headers(r.headers); // keeps text/plain + no-cache for the streamed reply
+            for (const [k, v] of Object.entries(CORS)) headers.set(k, v);
+            return new Response(r.body, { status: r.status, headers });
+          });
         case "/api/listen":
           if (req.method !== "POST") return json({ error: "POST only" }, 405);
           if (!env.GROQ_API_KEY) return json({ error: "Groq key missing on the server." }, 500);
@@ -106,7 +110,7 @@ export default {
           if (!env.GROQ_API_KEY) return json({ error: "Groq key missing on the server." }, 500);
           return json(await listenTranscribe(req, env, url));
         case "/api/markets":
-          return json(await markets(env));
+          return json(await markets(env, ctx));
         case "/api/alerts": {
           const since = Number(url.searchParams.get("since")) || Math.floor(Date.now() / 1000) - 300;
           return json(await alerts(env, since));
@@ -122,7 +126,7 @@ export default {
           if (req.method !== "POST") return json({ error: "POST only" }, 405);
           return json(await gymCommand(req, env));
         case "/api/brief":
-          return brief(req, env);
+          return brief(req, env, ctx);
         default:
           return json({ error: "Not found" }, 404);
       }
@@ -130,6 +134,18 @@ export default {
       console.error(url.pathname, err);
       return json({ error: err instanceof Error ? err.message : "Server error" }, 502);
     }
+  },
+
+  // Every 15 minutes (see "triggers" in wrangler.jsonc): rebuild the inbox, news and WHOOP
+  // so the glasses always get a ready copy. Claude only re-runs when something changed.
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    const jobs: [string, () => Promise<unknown>][] = [
+      ["inbox", () => (env.ANTHROPIC_API_KEY ? inbox(env, true) : Promise.resolve())],
+      ["news", () => news(env)],
+      ["whoop", () => whoopToday(env, undefined, true)],
+      ["markets", () => markets(env)],
+    ];
+    ctx.waitUntil(Promise.all(jobs.map(([name, run]) => run().catch((e) => console.error("cron", name, e)))));
   },
 } satisfies ExportedHandler<Env>;
 
@@ -171,13 +187,13 @@ async function reminders(req: Request, env: Env): Promise<Response> {
   return json({ ok: true, count: list.length });
 }
 
-async function dayContext(env: Env, body: BriefRequest): Promise<string> {
+async function dayContext(env: Env, body: BriefRequest, ctx: ExecutionContext): Promise<string> {
   const lines = [`Now: ${body.now}`];
   if (body.weather) lines.push(`Weather: ${body.weather}`);
   const [events, whoop, ib] = await Promise.all([
     body.dayStart && body.dayEnd ? agenda(env, body.dayStart, body.dayEnd).catch(() => null) : null,
-    whoopToday(env).catch(() => null),
-    inbox(env, false).catch(() => null), // cached for 15 minutes
+    whoopToday(env, ctx).catch(() => null),
+    inbox(env, false, ctx).catch(() => null), // the saved copy (kept fresh by the timer)
   ]);
   if (events) {
     const left = events.filter((e) => e.allDay || new Date(e.end).getTime() > Date.now());
@@ -202,11 +218,11 @@ async function dayContext(env: Env, body: BriefRequest): Promise<string> {
   return lines.join("\n");
 }
 
-async function brief(req: Request, env: Env): Promise<Response> {
+async function brief(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   if (!env.ANTHROPIC_API_KEY) return json({ error: "Claude key missing on the server." }, 500);
   const body = (await req.json()) as BriefRequest;
-  const context = await dayContext(env, body);
+  const context = await dayContext(env, body, ctx);
 
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   try {

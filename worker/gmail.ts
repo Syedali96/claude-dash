@@ -2,13 +2,15 @@
 // need a reply and things you sent that got no answer, then asks Claude to keep
 // only what matters and write one short line for each.
 import Anthropic from "@anthropic-ai/sdk";
+import { type Ctx, peek, refresh, swr } from "./cache";
 import { ACCOUNTS, type AccountKey, accessToken } from "./google";
 import type { Env } from "./index";
 
 const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
 const PER_ACCOUNT = 15; // newest threads looked at per inbox, per list
-const CACHE_KEY = "inbox:cache";
-const CACHE_SECONDS = 15 * 60;
+const CACHE_KEY = "inbox:v2";
+const FRESH_MS = 15 * 60_000; // older than this is refreshed in the background
+const KEEP_SECONDS = 24 * 3600;
 
 // Short tags shown on the glasses next to each item.
 export const TAGS: Record<AccountKey, string> = { ali: "ech", hello: "hel", alisyed: "asy", personal: "gml" };
@@ -202,11 +204,17 @@ async function triage(
   return JSON.parse(text);
 }
 
-export async function inbox(env: Env, fresh: boolean): Promise<Inbox> {
-  if (!fresh) {
-    const cached = await env.TOKENS.get(CACHE_KEY);
-    if (cached) return JSON.parse(cached) as Inbox;
-  }
+type Picked = Awaited<ReturnType<typeof triage>>;
+interface Built { result: Inbox; sig: string; picked: Picked }
+
+/** Fingerprint of the candidate threads, so Claude only re-triages when something changed. */
+async function signature(items: Candidate[]): Promise<string> {
+  const data = new TextEncoder().encode(items.map((c) => `${c.id}|${c.kind}|${c.snippet}`).sort().join("\n"));
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-1", data));
+  return [...hash.slice(0, 8)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function build(env: Env): Promise<Built> {
   const keys = Object.keys(ACCOUNTS) as AccountKey[];
   const results = await Promise.allSettled(keys.map((k) => candidates(env, k)));
   const all: Candidate[] = [];
@@ -218,8 +226,9 @@ export async function inbox(env: Env, fresh: boolean): Promise<Inbox> {
       skipped.push(ACCOUNTS[keys[i]]);
     }
   });
-
-  const picked = await triage(env, all);
+  const sig = await signature(all);
+  const prev = await peek<Built>(env, CACHE_KEY);
+  const picked = prev?.v.sig === sig && prev.v.picked ? prev.v.picked : await triage(env, all);
   const byId = new Map(all.map((c) => [c.id, c]));
   const toItems = (list: { id: string; line: string }[]) =>
     list.flatMap(({ id, line }) => {
@@ -233,8 +242,15 @@ export async function inbox(env: Env, fresh: boolean): Promise<Inbox> {
     skipped,
     advice: picked.advice ?? "",
   };
-  await env.TOKENS.put(CACHE_KEY, JSON.stringify(result), { expirationTtl: CACHE_SECONDS });
-  return result;
+  return { result, sig, picked };
+}
+
+/** The triaged inbox. Saved copy right away; `fresh` (or the timer) rebuilds it now. */
+export async function inbox(env: Env, fresh: boolean, ctx?: Ctx): Promise<Inbox> {
+  const b = fresh
+    ? await refresh(env, CACHE_KEY, () => build(env), KEEP_SECONDS)
+    : await swr(env, ctx, CACHE_KEY, FRESH_MS, () => build(env), KEEP_SECONDS);
+  return b.result;
 }
 
 // ---------- new-email alerts ----------
@@ -309,11 +325,9 @@ export async function alerts(env: Env, sinceSec: number): Promise<{ now: number;
 
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const r = await client.beta.messages.create({
-    model: "claude-opus-5-5",
+    model: "claude-haiku-5-5", // measured Nov 25: ~1-1.2 s faster than Opus here, same answers,
     max_tokens: 2000,
     output_config: { effort: "low", format: { type: "json_schema", schema: ALERT_SCHEMA } },
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
     system:
       "New emails just arrived for a startup founder. For each, decide needsYou: true only if a real person wants something " +
       "from them or it's genuinely important (investors, customers, partners, deadlines, money). False for FYIs, receipts, " +

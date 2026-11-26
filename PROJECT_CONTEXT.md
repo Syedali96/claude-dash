@@ -225,7 +225,8 @@ npx wrangler kv key delete --binding TOKENS --remote "<key>"   # clear a cache (
 - News (also v0.9.0): 3 world stories first (BBC World, NPR World), then Morning Brew / Tech Brew. The app polls every 15 min; the server re-checks feeds at most every 15 min (cache `news:top10:v2`) and only calls Claude when the feed titles changed. World-story summaries read the article page because those feeds only carry teasers.
 - 0.10.0: Listen card (Ali's choices: 2 minutes back, quick explainer, keeps listening after an answer, no read-aloud). Footer dots widened for 7 cards. Settings v12.
 - 0.11.0: faster Listen: background transcription every 30 s, silence dropped, raw audio instead of base64, streamed answer (topic first).
-- Testing hooks (dev only): `?listentest=<transcript>` shows a Listen answer, `?listentest=dots` the listening screen; `LOCAL_API=1 npm run dev` uses the local Worker; `?gymseed` loads sample history, `?gymtest=a|b` runs typed gym commands, `?asktest=q1|q2` asks typed questions in one chat.
+- 0.12.0 (Nov 26): speed. Worker returns saved copies at once and refreshes in the background (`worker/cache.ts`, keys `inbox:v2`, `whoop:today:v2`, `markets:v2`); a 15-minute cron (`scheduled` in `worker/index.ts`, `triggers` in `wrangler.jsonc`) rebuilds inbox, news, WHOOP and markets, and the inbox only re-asks Claude when the threads changed (SHA-1 signature). Ask streams: multipart in (raw audio), reply is `QUESTION: ...\n` then text, `\x1e` = drop the text before a lookup. Gym also sends raw audio (multipart; JSON still accepted). Streams send `Content-Encoding: identity` (gzip held Listen/Ask text until the end). Email alerts and the WHOOP tip use `claude-haiku-5-5` (about 1 s faster, measured); gym and everything else stay on Opus. Phone saves the last screens (`claude-dash-snapshot`) and shows them at launch, with "updated h:mm" in the footer when over 5 minutes old; the day plan isn't remade at launch if under 2 hours old. Redraws only swap changed text unless the layout changed or more than 3 boxes changed. Listen dots are smaller and animate (one bright dot steps every 0.5 s). Ali chose to keep background polling while asleep as it was.
+- Testing hooks (dev only): `?savedtest` shows the "updated" footer; `?listentest=<transcript>` shows a Listen answer, `?listentest=dots` the listening screen; `LOCAL_API=1 npm run dev` uses the local Worker; `?gymseed` loads sample history, `?gymtest=a|b` runs typed gym commands, `?asktest=q1|q2` asks typed questions in one chat.
 
 ## 7. Known limits and gotchas
 
@@ -235,6 +236,7 @@ npx wrangler kv key delete --binding TOKENS --remote "<key>"   # clear a cache (
 - Cloudflare free plan limits each request to about 50 outbound requests. That's why Gmail uses batch requests, and Ask caps email searches at 2.
 - Google OAuth sign-in doesn't work inside the Even app's WebView. Use the Mac browser.
 - Reading answers aloud while the phone is locked is untested.
+- The simulator's fetch wrapper waits for the whole reply, so streaming (Ask, Listen) looks all-at-once there. Check streaming in a normal browser with `?asktest=`.
 - The gym "last time" comparison is untested on real data.
 
 ## 8. Ideas Ali hasn't chosen yet

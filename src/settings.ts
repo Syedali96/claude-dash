@@ -145,3 +145,26 @@ export async function saveSettings(bridge: EvenAppBridge | null, s: Settings): P
     /* ignore */
   }
 }
+
+// ---------- last screens (shown at once on the next launch, then refreshed) ----------
+
+const SNAP_KEY = "claude-dash-snapshot";
+
+export async function loadSnapshot<T>(bridge: EvenAppBridge | null): Promise<T | null> {
+  try {
+    const raw = bridge ? await bridge.getLocalStorage(SNAP_KEY) : localStorage.getItem(SNAP_KEY) ?? "";
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSnapshot(bridge: EvenAppBridge | null, snap: unknown): Promise<void> {
+  const raw = JSON.stringify(snap);
+  try {
+    if (bridge) await bridge.setLocalStorage(SNAP_KEY, raw);
+    else localStorage.setItem(SNAP_KEY, raw);
+  } catch {
+    /* ignore */
+  }
+}

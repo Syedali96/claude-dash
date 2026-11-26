@@ -213,14 +213,31 @@ async function matchKnown(env: Env, name: string, known: string[]): Promise<stri
   return known.includes(match) ? match : name;
 }
 
+/** JSON body (older app versions, base64 audio) or a multipart form: audio (raw PCM file), today, known (JSON), text. */
+async function readCommand(req: Request): Promise<{ body: CommandRequest; pcm: Uint8Array | null }> {
+  if (!(req.headers.get("Content-Type") ?? "").startsWith("multipart/form-data")) {
+    const body = (await req.json()) as CommandRequest;
+    return { body, pcm: body.audio ? Uint8Array.from(atob(body.audio), (c) => c.charCodeAt(0)) : null };
+  }
+  const form = await req.formData();
+  const audio = form.get("audio");
+  return {
+    body: {
+      text: String(form.get("text") ?? ""),
+      today: JSON.parse(String(form.get("today") || "[]")) as GymSet[],
+      known: JSON.parse(String(form.get("known") || "[]")) as string[],
+    },
+    pcm: audio && typeof audio !== "string" ? new Uint8Array(await audio.arrayBuffer()) : null,
+  };
+}
+
 export async function gymCommand(req: Request, env: Env): Promise<{ text: string; command: GymCommand }> {
-  const body = (await req.json()) as CommandRequest;
+  const { body, pcm } = await readCommand(req);
   const today = body.today ?? [];
   const known = [...new Set(body.known ?? [])].slice(0, 200);
   let text = body.text?.trim() ?? "";
-  if (!text && body.audio) {
+  if (!text && pcm) {
     if (!env.GROQ_API_KEY) throw new Error("Groq key missing on the server.");
-    const pcm = Uint8Array.from(atob(body.audio), (c) => c.charCodeAt(0));
     if (pcm.length < SAMPLE_RATE * 2 * 0.3) return { text: "", command: { action: "none" } };
     text = await transcribe(env, pcm, "Gym log. Bench press, 185 pounds, 8 reps. Cancel that. Delete my second squat set. Workout complete.");
   }

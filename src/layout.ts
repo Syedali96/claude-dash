@@ -94,7 +94,7 @@ function page(frame: Frame, s: Settings) {
 
 /** True when the tile arrangement changed (needs a rebuild, not just new text). */
 export function shapeChanged(a: Frame, b: Frame): boolean {
-  const sig = (f: Frame) => f.body.tiles.map((t) => `${t.x},${t.y},${t.w},${t.h},${!!t.border},${!!t.dim}`).join("|");
+  const sig = (f: Frame) => `${captureIndex(f.body.tiles)}:` + f.body.tiles.map((t) => `${t.x},${t.y},${t.w},${t.h},${!!t.border},${!!t.dim}`).join("|");
   return sig(a) !== sig(b);
 }
 

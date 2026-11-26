@@ -3,6 +3,7 @@
 // snapshot (S&P 500 + Bitcoin). Refreshed at most every 15 minutes, and Claude only
 // re-picks when the feeds actually have new stories.
 import Anthropic from "@anthropic-ai/sdk";
+import { type Ctx, swr } from "./cache";
 import type { Env } from "./index";
 
 const FEEDS = [
@@ -58,11 +59,20 @@ function ask(env: Env, system: string, content: string, schema: Record<string, u
     });
 }
 
-async function stories(env: Env, refresh = true): Promise<Cached> {
+/** Today's picks. A stale list is returned at once and re-checked in the background (when ctx is given). */
+async function stories(env: Env, refresh = true, ctx?: Ctx): Promise<Cached> {
   const raw = await env.TOKENS.get(CACHE_KEY);
   const cached = raw ? (JSON.parse(raw) as Cached) : null;
   if (cached && (!refresh || Date.now() - (cached.checked ?? Date.parse(cached.at)) < FRESH_MS)) return cached;
+  const job = update(env, cached);
+  if (cached && ctx) {
+    ctx.waitUntil(job.catch((e) => console.error("news refresh", e)));
+    return cached;
+  }
+  return job;
+}
 
+async function update(env: Env, cached: Cached | null): Promise<Cached> {
   const lists = await Promise.all(
     FEEDS.map(async (f) => {
       const res = await fetch(f.url, { headers: { "User-Agent": "Mozilla/5.0 (ClaudeDash personal reader)" } }).catch(() => null);
@@ -134,8 +144,8 @@ async function stories(env: Env, refresh = true): Promise<Cached> {
   return out;
 }
 
-export async function news(env: Env): Promise<{ at: string; headlines: string[] }> {
-  const s = await stories(env);
+export async function news(env: Env, ctx?: Ctx): Promise<{ at: string; headlines: string[] }> {
+  const s = await stories(env, true, ctx);
   return { at: s.at, headlines: s.stories.map((x) => x.line) };
 }
 
@@ -144,9 +154,11 @@ export async function news(env: Env): Promise<{ at: string; headlines: string[] 
 export interface Markets { sp500: number | null; btc: number | null; btcChange: number | null }
 
 /** S&P 500 day change (Yahoo Finance) and Bitcoin price + 24h change (CoinGecko). Cached 5 minutes. */
-export async function markets(env: Env): Promise<Markets> {
-  const cached = await env.TOKENS.get("markets");
-  if (cached) return JSON.parse(cached);
+export function markets(env: Env, ctx?: Ctx): Promise<Markets> {
+  return swr(env, ctx, "markets:v2", 5 * 60_000, fetchMarkets, 24 * 3600);
+}
+
+async function fetchMarkets(): Promise<Markets> {
   const ua = { "User-Agent": "Mozilla/5.0 (ClaudeDash personal reader)" };
   const [sp, btc] = await Promise.all([
     fetch("https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?range=1d&interval=1d", { headers: ua })
@@ -180,7 +192,7 @@ export async function markets(env: Env): Promise<Markets> {
     btc: btc?.usd ?? null,
     btcChange: btc?.usd_24h_change == null ? null : Math.round(btc.usd_24h_change * 100) / 100,
   };
-  if (out.sp500 != null || out.btc != null) await env.TOKENS.put("markets", JSON.stringify(out), { expirationTtl: 300 });
+  if (out.sp500 == null && out.btc == null) throw new Error("Market prices unavailable.");
   return out;
 }
 
