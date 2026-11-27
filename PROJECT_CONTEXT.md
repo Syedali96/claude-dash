@@ -26,7 +26,7 @@ Everything needed to keep building **Claude Dash**: Ali's personal Claude-powere
 | Google accounts connected (4) | Inboxes | `ali@echonos.ai` (calendar + inbox, tag `ech`), `hello@echonos.ai` (`hel`), `ali@ali-syed.com` (`asy`, Google Workspace), `syedbali1996@gmail.com` (`gml`). |
 | WHOOP developer app | Recovery, sleep, strain | OAuth. Redirect: `/auth/whoop/callback`. Scopes: `offline read:recovery read:cycles read:sleep read:workout read:profile`. Refresh tokens rotate on each use. |
 | Groq (free tier) | Speech-to-text | `whisper-large-v3-turbo`. Used by the gym log and Ask Claude. |
-| Morning Brew + Tech Brew | News | Public RSS feeds `morningbrew.com/feed` and `techbrew.com/feed`. Both include full article text. |
+| News feeds | News | Public RSS: BBC World, NPR World, `morningbrew.com/feed`, `techbrew.com/feed` (full text), TechCrunch, BBC Technology. |
 | Yahoo Finance + Coinbase | Markets | S&P 500 day %, BTC price + 24h %. CoinGecko is blocked from Cloudflare, so it isn't used. |
 | iPhone Shortcuts | Reminders sync | A "Send Reminders" Shortcut POSTs reminders due today to `/api/reminders`. |
 | Claude Code Remote Control | Drive Claude Code from his phone | Requires a claude.ai subscription login (`/login` inside `claude`), then `claude rc`. |
@@ -136,7 +136,7 @@ Double-tap special cases:
 - **News**
   - Top tiles: S&P 500 % and BTC $price %.
   - Up to 10 headlines with a `>` cursor. Tap moves the cursor; double tap opens a summary (main point, 3–4 bullets, "Why it matters"). Inside a summary, tap pages and double tap goes back.
-  - Story selection: Morning Brew (last 3 days) is preferred, topped up with Tech Brew (last 14 days). Claude must **skip irrelevant topics** (celebrity casting, gift guides, lifestyle, college/student trends, sports) and never picks two stories about the same event. On slow days it shows 9 rather than padding.
+  - Story selection: 3 world stories (BBC World, NPR World), then tech/business from Morning Brew, Tech Brew, TechCrunch and BBC Technology, favoring the last 4 hours (wider only if a group runs short). Since 0.14.1, no story stays on screen over 4 hours: each story remembers when it first appeared and is retired after 3.5 h, never returns (remembered 48 h), and Claude is told the retired topics so it moves on unless there's a real new development. Claude must **skip irrelevant topics** (celebrity casting, gift guides, lifestyle, college/student trends, sports) and never picks two stories about the same event. On slow days it shows 9 rather than padding.
 - **Inbox:** two count tiles (N TO REPLY, N TO FOLLOW UP), then a list. "Reply" means threads from the last 7 days where a real person spoke last; newsletters, receipts and robots are filtered out. "Follow up" means Ali sent the last message 1–7 days ago with no reply. Claude writes the 36-character lines.
 - **Gym**
   - Status tile shows READY / ● LISTENING / Logging... / REST mm:ss / GO.
