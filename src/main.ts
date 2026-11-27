@@ -362,7 +362,7 @@ async function openStory() {
   st.reader = { title, lines: [], page: 0, loading: true, error: null };
   await render();
   try {
-    const data = await api<{ title: string; summary: string }>(st.settings, `/api/news/article?n=${n}`);
+    const data = await api<{ title: string; summary: string }>(st.settings, `/api/news/article?n=${n}&line=${encodeURIComponent(title)}`);
     if (st.reader?.title !== title) return; // closed or changed meanwhile
     st.reader = { title: data.title, lines: storyLines(data.summary), page: 0, loading: false, error: null };
   } catch (e) {

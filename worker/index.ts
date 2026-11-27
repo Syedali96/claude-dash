@@ -116,7 +116,7 @@ export default {
           return json(await alerts(env, since));
         }
         case "/api/news/article":
-          return json(await article(env, Number(url.searchParams.get("n") ?? 0)));
+          return json(await article(env, Number(url.searchParams.get("n") ?? 0), url.searchParams.get("line") ?? undefined));
         case "/api/reminders":
           return reminders(req, env);
         case "/api/gym/parse":
