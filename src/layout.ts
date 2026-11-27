@@ -13,6 +13,7 @@ import {
   TextContainerUpgrade,
 } from "@evenrealities/even_hub_sdk";
 import type { Body, Tile } from "./cards";
+import { catContainer } from "./posture";
 import type { Settings } from "./settings";
 
 export const SCREEN = { width: 576, height: 288 };
@@ -44,6 +45,7 @@ export interface Frame {
   body: Body;
   dots: string; // "● ○ ○ ○ ○"
   hint: string; // "2/2   tap  more"
+  cat?: boolean; // posture cat pop-up in the bottom-right corner
 }
 
 function text(
@@ -89,12 +91,13 @@ function page(frame: Frame, s: Settings) {
     text(r.dots.id, r.dots.name, r.dots.x, r.dots.y, r.dots.w, r.dots.h, frame.dots, b.footer + 1, false, 3, false, 4),
     text(r.hint.id, r.hint.name, r.hint.x, r.hint.y, r.hint.w, r.hint.h, frame.hint, b.footer, false, 4, false, 4),
   ];
-  return { containerTotalNum: textObject.length, textObject, menuObject };
+  const imageObject = frame.cat ? [catContainer()] : [];
+  return { containerTotalNum: textObject.length + imageObject.length, textObject, imageObject, menuObject };
 }
 
 /** True when the tile arrangement changed (needs a rebuild, not just new text). */
 export function shapeChanged(a: Frame, b: Frame): boolean {
-  const sig = (f: Frame) => `${captureIndex(f.body.tiles)}:` + f.body.tiles.map((t) => `${t.x},${t.y},${t.w},${t.h},${!!t.border},${!!t.dim}`).join("|");
+  const sig = (f: Frame) => `${captureIndex(f.body.tiles)}:` + f.body.tiles.map((t) => `${t.x},${t.y},${t.w},${t.h},${!!t.border},${!!t.dim}`).join("|") + (f.cat ? ":cat" : "");
   return sig(a) !== sig(b);
 }
 
@@ -115,9 +118,10 @@ export async function drawFrame(bridge: EvenAppBridge, frame: Frame, s: Settings
 }
 
 /** Sleep: replace everything with one empty, borderless box so nothing is lit. Taps still reach us. */
-export async function drawBlank(bridge: EvenAppBridge): Promise<boolean> {
+export async function drawBlank(bridge: EvenAppBridge, cat = false): Promise<boolean> {
   const blank = text(9, "sleep", 0, 0, SCREEN.width, SCREEN.height, " ", 0, true, 1, false, 0);
-  return bridge.rebuildPageContainer(new RebuildPageContainer({ containerTotalNum: 1, textObject: [blank], menuObject }));
+  const imageObject = cat ? [catContainer()] : [];
+  return bridge.rebuildPageContainer(new RebuildPageContainer({ containerTotalNum: 1 + imageObject.length, textObject: [blank], imageObject, menuObject }));
 }
 
 /** Update a header/footer region in place (cheaper than a rebuild, no flicker). */

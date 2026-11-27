@@ -59,6 +59,7 @@ export function mountPhoneUI(initial: Settings, hooks: Hooks) {
     for (const k of ["heavy", "compound", "isolation"] as const) $<HTMLInputElement>(`#rest-${k}`).value = String(s.rest[k]);
     $<HTMLInputElement>("#h24").checked = s.use24h;
     $<HTMLInputElement>("#hints").checked = s.showHints;
+    $<HTMLInputElement>("#posture").checked = s.postureCat;
     for (const k of ["header", "body", "footer"] as const) $<HTMLInputElement>(`#b-${k}`).value = String(s.brightness[k]);
     $<HTMLInputElement>("#server").value = s.serverUrl;
     $<HTMLInputElement>("#token").value = s.accessToken;
@@ -89,6 +90,7 @@ export function mountPhoneUI(initial: Settings, hooks: Hooks) {
   $("#token").addEventListener("change", (e) => { s.accessToken = (e.target as HTMLInputElement).value.trim(); fill(); emit(); });
   $("#h24").addEventListener("change", (e) => { s.use24h = (e.target as HTMLInputElement).checked; emit(); });
   $("#hints").addEventListener("change", (e) => { s.showHints = (e.target as HTMLInputElement).checked; emit(); });
+  $("#posture").addEventListener("change", (e) => { s.postureCat = (e.target as HTMLInputElement).checked; emit(); });
   for (const k of ["header", "body", "footer"] as const)
     $(`#b-${k}`).addEventListener("input", (e) => { s.brightness[k] = Number((e.target as HTMLInputElement).value); emit(); });
 

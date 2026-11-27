@@ -12,6 +12,7 @@ import { alertFrame, alertPages, askPages, LISTEN_DOT_MS, LISTEN_SECONDS, listen
 import { drawBlank, drawFrame, type Frame, MENU, shapeChanged, updateRegion, updateTile } from "./layout";
 import { canonicalName, exerciseKey, nextTip } from "./exercises";
 import { mountPhoneUI } from "./phone";
+import * as posture from "./posture";
 import { type LoggedSet, loadGym, loadSettings, loadSnapshot, saveGym, saveSettings, saveSnapshot } from "./settings";
 
 type Gesture = "next" | "prev" | "tap" | "double" | "long";
@@ -52,7 +53,7 @@ function frame(): Frame {
     return { title: " ", status: " ", body: CARDS.listen.body(st), dots: " ", hint: " " };
   }
   const body = alertFrame(st)?.body ?? CARDS[id].body(st); // a new-email pop-up covers the card
-  return { ...header(st, current, battery), body, ...footer(st, current) };
+  return { ...header(st, current, battery), body, ...footer(st, current), cat: !!posture.catPose() };
 }
 
 /** How many text boxes differ between two frames with the same layout. */
@@ -73,6 +74,7 @@ async function render(force = false) {
   if (!bridge || asleep) return;
   if (force || !lastFrame || shapeChanged(lastFrame, f) || changes(lastFrame, f) > 3) {
     await drawFrame(bridge, f, st.settings);
+    posture.resetSent(); // a rebuilt page starts with an empty cat box
   } else {
     if (f.title !== lastFrame.title) await updateRegion(bridge, "title", f.title);
     if (f.status !== lastFrame.status) await updateRegion(bridge, "status", f.status);
@@ -83,6 +85,27 @@ async function render(force = false) {
     for (const [i, t] of f.body.tiles.entries()) if (t.text !== old[i]?.text) await updateTile(bridge, i, t.text);
   }
   lastFrame = f;
+  if (f.cat) await posture.syncImage(bridge);
+}
+
+// ---------- posture cat ----------
+
+/** The cat stays away while Ask, Listen, the gym or an email pop-up needs the screen. */
+function catAllowed(): boolean {
+  const card = st.settings.cards[current];
+  if (card === "ask" || card === "listen" || card === "gym") return false;
+  if (st.alertView || st.ask.streaming) return false;
+  return st.ask.phase !== "listening" && st.ask.phase !== "thinking" && st.listen.phase === "off" && !st.gym.recording;
+}
+
+/** The cat appeared, changed or went away: redraw (on the blank screen too, if the display is off). */
+async function catChanged() {
+  if (!asleep) return render();
+  if (!bridge) return;
+  const cat = !!posture.catPose();
+  await drawBlank(bridge, cat).catch(() => {});
+  posture.resetSent();
+  if (cat) await posture.syncImage(bridge);
 }
 
 // ---------- data ----------
@@ -1000,8 +1023,12 @@ function busy(): boolean {
 
 async function goToSleep() {
   asleep = true;
-  if (bridge) await drawBlank(bridge).catch(() => {});
   lastFrame = null;
+  if (!bridge) return;
+  const cat = !!posture.catPose();
+  await drawBlank(bridge, cat).catch(() => {});
+  posture.resetSent();
+  if (cat) await posture.syncImage(bridge);
 }
 
 function sleepTick() {
@@ -1110,6 +1137,7 @@ async function boot() {
         if (id === MENU.close) await bridge!.shutDownPageContainer(0);
         return;
       }
+      if (ev.sysEvent && posture.onSysEvent(bridge!, ev.sysEvent, st.settings.postureCat)) return;
       const g = toGesture(ev);
       if (g) await handle(g);
     });
@@ -1126,6 +1154,7 @@ async function boot() {
   await gymDevTest();
   await listenDevTest();
   savedDevTest();
+  if (import.meta.env.DEV) posture.devTest(new URLSearchParams(location.search).get("posturetest"));
   if (!st.settings.cards.length) st.settings.cards = ["agenda"];
   await render();
   refreshWeather();
@@ -1154,6 +1183,7 @@ async function boot() {
   setInterval(() => {
     st.now = new Date();
     sleepTick();
+    if (posture.tick(bridge, st.settings.postureCat, catAllowed())) catChanged();
     if (st.alertView?.closeAt && Date.now() > st.alertView.closeAt) closeAlerts();
     const minute = st.now.getMinutes();
     const card = st.settings.cards[current];

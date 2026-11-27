@@ -29,6 +29,7 @@ export interface Settings {
   // Brightness levels 0-4 (4 = brightest) for each region of the screen.
   brightness: { header: number; body: number; footer: number };
   showHints: boolean; // gesture hints in the footer
+  postureCat: boolean; // a cat pops up when you slouch (uses the glasses' motion sensor)
 }
 
 export const SETTINGS_VERSION = 12;
@@ -50,6 +51,7 @@ export const DEFAULTS: Settings = {
   use24h: false,
   brightness: { header: 2, body: 4, footer: 1 },
   showHints: true,
+  postureCat: true,
 };
 
 const KEY = "claude-dash-settings";
