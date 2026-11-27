@@ -59,6 +59,21 @@ const tag = (item: string, name: string) => decode(item.match(new RegExp(`<${nam
 /** One id per story, so the same story is recognized across checks (links can carry tracking bits). */
 const storyKey = (title: string, link: string) => (link ? link.replace(/[?#].*$/, "") : title).slice(0, 200);
 
+// Words a headline can't end on ("storm cuts power across" reads as cut off).
+const DANGLING = /\s+(across|after|amid|and|as|at|by|for|from|in|into|of|on|or|over|the|to|with|a|an|but|than|its|their|his|her|new|says|is|are|was|vs)$/i;
+
+/** Fit a headline into 38 characters without leaving it hanging mid-phrase. */
+export function fitLine(line: string, max = 38): string {
+  line = line.trim().replace(/[\s,;:.-]+$/, "");
+  if (line.length <= max) return line;
+  let cut = line.slice(0, max + 1).replace(/\s+\S*$/, ""); // whole words only
+  // Prefer ending at a natural break (comma, dash, colon) if one leaves most of the line.
+  const brk = Math.max(cut.lastIndexOf(", "), cut.lastIndexOf(" - "), cut.lastIndexOf(": "));
+  if (brk >= 18) cut = cut.slice(0, brk);
+  while (DANGLING.test(cut)) cut = cut.replace(DANGLING, "");
+  return cut.replace(/[\s,;:.-]+$/, "");
+}
+
 const ago = (ms: number) => (ms < HOUR ? `${Math.max(1, Math.round(ms / 60_000))}m ago` : `${Math.round(ms / HOUR)}h ago`);
 
 function ask(env: Env, system: string, content: string, schema: Record<string, unknown>, maxTokens = 2000) {
@@ -201,7 +216,7 @@ async function update(env: Env, cached: Cached | null): Promise<Cached> {
         ? "These topics were already on their screen for hours, so skip them unless a story reports a clearly new development, " +
           "and then make the line say what's new:\n" + retired.join("\n") + "\n"
         : "") +
-      'For each, give its number and a plain, factual line of at most 36 characters, e.g. "Nvidia beats earnings, outlook murky". No emoji, no quotes.',
+      'For each, give its number and a plain, factual line of at most 34 characters (count them; a complete phrase, never cut off), e.g. "Nvidia beats earnings, outlook murky". No emoji, no quotes.',
     items.map((i, n) => `[${n}] (${i.source}, ${i.at ? ago(now - i.at) : "undated"}) ${i.title}: ${i.summary}`).join("\n"),
     {
       type: "object",
@@ -222,7 +237,7 @@ async function update(env: Env, cached: Cached | null): Promise<Cached> {
     .slice(0, COUNT)
     .map((p) => {
       const it = items[p.n];
-      const line = p.line.length <= 38 ? p.line : p.line.slice(0, 38).replace(/\s+\S*$/, "");
+      const line = fitLine(p.line);
       // A story that was already up keeps its original start time, so its 4 hours don't reset.
       const shown = seen[it.key]?.at ?? now;
       seen[it.key] ??= { at: shown, line };
