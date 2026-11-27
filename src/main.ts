@@ -3,19 +3,21 @@ import {
   AudioInputSource,
   DeviceConnectType,
   type EvenAppBridge,
+  EventSourceType,
   type EvenHubEvent,
   OsEventTypeList,
   waitForEvenAppBridge,
 } from "@evenrealities/even_hub_sdk";
 import { ApiError, api, apiStream } from "./api";
-import { alertFrame, alertPages, askPages, LISTEN_DOT_MS, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
+import { ASK, alertFrame, alertPages, askPages, LISTEN_DOT_MS, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
 import { drawBlank, drawFrame, type Frame, MENU, shapeChanged, updateRegion, updateTile } from "./layout";
 import { canonicalName, exerciseKey, nextTip } from "./exercises";
 import { mountPhoneUI } from "./phone";
 import * as posture from "./posture";
 import { type LoggedSet, loadGym, loadSettings, loadSnapshot, saveGym, saveSettings, saveSnapshot } from "./settings";
 
-type Gesture = "next" | "prev" | "tap" | "double" | "long";
+// ltap / ldouble: a tap or double tap on the LEFT arm of the glasses (opens Ask Claude).
+type Gesture = "next" | "prev" | "tap" | "double" | "long" | "ltap" | "ldouble";
 
 let bridge: EvenAppBridge | null = null;
 let current = 0;
@@ -38,6 +40,7 @@ const st: DashState = {
   whoop: null,
   saved: {},
   briefPage: 0,
+  askOpen: false,
   ask: { phase: "ready", followUp: false, question: "", lines: [], page: 0, history: [], error: null },
   listen: { phase: "off", topic: "", lines: [], page: 0, error: null },
   gym: {
@@ -48,6 +51,10 @@ const st: DashState = {
 
 function frame(): Frame {
   const id = st.settings.cards[current];
+  // Ask Claude covers the current card (an email pop-up still goes on top).
+  if (st.askOpen && !st.alertView) {
+    return { ...header(st, current, battery), body: ASK.body(st), ...footer(st, current), cat: false };
+  }
   // Listening: nothing on screen but three dim dots.
   if (id === "listen" && st.listen.phase === "listening" && !st.alertView) {
     return { title: " ", status: " ", body: CARDS.listen.body(st), dots: " ", hint: " " };
@@ -69,7 +76,7 @@ function changes(a: Frame, b: Frame): number {
  * rebuild is only for a new layout, lots of changes at once (like a new card), or `force`.
  */
 async function render(force = false) {
-  const f = frame();
+  const f = touchTest ? touchFrame() : frame();
   phone.preview(f);
   if (!bridge || asleep) return;
   if (force || !lastFrame || shapeChanged(lastFrame, f) || changes(lastFrame, f) > 3) {
@@ -93,7 +100,7 @@ async function render(force = false) {
 /** The cat stays away while Ask, Listen, the gym or an email pop-up needs the screen. */
 function catAllowed(): boolean {
   const card = st.settings.cards[current];
-  if (card === "ask" || card === "listen" || card === "gym") return false;
+  if (st.askOpen || card === "listen" || card === "gym") return false;
   if (st.alertView || st.ask.streaming) return false;
   return st.ask.phase !== "listening" && st.ask.phase !== "thinking" && st.listen.phase === "off" && !st.gym.recording;
 }
@@ -613,7 +620,7 @@ async function gymDevTest() {
   if (q.has("gymtest") && i >= 0) current = i;
   // ?asktest=q1|q2 asks typed questions in one chat (each keeps the earlier ones as context).
   for (const text of (q.get("asktest") ?? "").split("|").filter(Boolean)) {
-    current = st.settings.cards.indexOf("ask");
+    st.askOpen = true;
     st.ask = { ...st.ask, phase: "thinking" };
     await askStream({ text });
   }
@@ -648,6 +655,39 @@ async function cancelAsk() {
   await bridge?.audioControl(false).catch(() => false);
   pcm = [];
   st.ask = { ...st.ask, phase: st.ask.lines.length ? "answer" : "ready" };
+}
+
+/** A left-arm tap (or 2x = new chat). Opens Ask and starts listening; then send, next page, follow-up. */
+async function askGesture(newChat: boolean) {
+  const a = st.ask;
+  if (a.phase === "thinking" || a.streaming) {
+    if (!st.askOpen) { st.askOpen = true; return render(); } // just show the answer that's coming
+    return;
+  }
+  // The gym mic is busy: don't take it.
+  if (st.gym.recording || st.gym.busy) return;
+  if (!st.askOpen) {
+    st.askOpen = true;
+    st.alertView = null;
+    if (st.listen.phase !== "off") await stopListen(); // one mic at a time
+    if (newChat) st.ask = { ...st.ask, lines: [], question: "", page: 0, history: [] };
+    return startAsk(!newChat && a.history.length > 0);
+  }
+  if (newChat) {
+    await cancelAsk();
+    st.ask = { ...st.ask, phase: "ready", followUp: false, question: "", lines: [], page: 0, history: [], error: null };
+    return startAsk(false);
+  }
+  if (a.phase === "listening") return stopAsk();
+  if (a.phase === "answer" && a.page + 1 < askPages(st)) { a.page++; return render(); }
+  return startAsk(a.history.length > 0); // keeps the conversation going
+}
+
+/** Swipe while Ask is open: stop listening (nothing is sent) and go back to the card you were on. */
+async function closeAsk() {
+  await cancelAsk();
+  st.askOpen = false;
+  return render();
 }
 
 async function stopAsk() {
@@ -933,7 +973,61 @@ async function listenDevTest() {
   if (text !== "dots") await explain(text);
 }
 
+// ---------- touch test (dev only): ?touchtest shows which surface sent each event ----------
+
+const touchTest = import.meta.env.DEV && new URLSearchParams(location.search).has("touchtest");
+const touchLog: string[] = [];
+let touchCount = 0;
+
+const SOURCE_NAME: Record<number, string> = {
+  [EventSourceType.TOUCH_EVENT_FROM_RING]: "RING",
+  [EventSourceType.TOUCH_EVENT_FROM_GLASSES_R]: "RIGHT ARM",
+  [EventSourceType.TOUCH_EVENT_FROM_GLASSES_L]: "LEFT ARM",
+};
+
+/** Find an eventSource anywhere in the raw host JSON (the parsed text/list events don't carry one). */
+function rawSource(o: unknown, depth = 0): unknown {
+  if (!o || typeof o !== "object" || depth > 4) return undefined;
+  for (const [k, v] of Object.entries(o)) {
+    if (k.replace(/_/g, "").toLowerCase() === "eventsource") return v;
+    const found = rawSource(v, depth + 1);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function touchFrame(): Frame {
+  const body = touchLog.length ? touchLog.join("\n") : "Tap the ring, left arm, right arm.\nTry double tap and long press too.";
+  return {
+    title: "TOUCH TEST",
+    status: `${touchCount} events`,
+    body: { tiles: [{ x: 0, y: 0, w: 576, h: 202, text: body, border: true }] },
+    dots: "",
+    hint: "newest on top",
+  };
+}
+
+async function onTouchTestEvent(ev: EvenHubEvent) {
+  const src = ev.textEvent ?? ev.listEvent ?? ev.sysEvent;
+  console.log("[touchtest] raw event", JSON.stringify({ textEvent: ev.textEvent, listEvent: ev.listEvent, sysEvent: ev.sysEvent, jsonData: ev.jsonData }));
+  if (!src || ev.sysEvent?.imuData) return;
+  const t = src.eventType ?? OsEventTypeList.CLICK_EVENT;
+  const gesture = OsEventTypeList[t] ?? `TYPE ${t}`;
+  const kind = ev.textEvent ? "text" : ev.listEvent ? "list" : "sys";
+  const parsed = ev.sysEvent?.eventSource;
+  const raw = parsed ?? rawSource(ev.jsonData);
+  const n = typeof raw === "string" ? (EventSourceType.fromJson(raw) ?? Number(raw)) : (raw as number | undefined);
+  const where = n ? (SOURCE_NAME[n] ?? `SOURCE ${n}`) : "UNKNOWN";
+  touchCount++;
+  touchLog.unshift(`${touchCount}. ${gesture.replace(/_EVENT$/, "")} - ${where} (${kind})`);
+  touchLog.length = Math.min(touchLog.length, 5);
+  fetch("/__touchlog", { method: "POST", body: JSON.stringify({ line: touchLog[0], parsedSource: parsed ?? null, rawSource: raw ?? null, sysEvent: ev.sysEvent, textEvent: ev.textEvent, listEvent: ev.listEvent, jsonData: ev.jsonData }) }).catch(() => {});
+  await render();
+}
+
 // ---------- input ----------
+
+const simLeftTap = import.meta.env.DEV && new URLSearchParams(location.search).has("lefttap");
 
 function toGesture(ev: EvenHubEvent): Gesture | null {
   const src = ev.textEvent ?? ev.listEvent ?? ev.sysEvent;
@@ -941,6 +1035,12 @@ function toGesture(ev: EvenHubEvent): Gesture | null {
   if (ev.sysEvent?.imuData) return null;
   // CLICK_EVENT is 0, which protobuf hosts often omit, so a missing type means tap.
   const t = src.eventType ?? OsEventTypeList.CLICK_EVENT;
+  // The left arm of the glasses is Ask Claude's button (the ring and right arm keep their gestures).
+  // ?lefttap (dev only): the simulator can't say which surface was touched, so its taps count as the left arm.
+  if (ev.sysEvent?.eventSource === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L || simLeftTap) {
+    if (t === OsEventTypeList.CLICK_EVENT) return "ltap";
+    if (t === OsEventTypeList.DOUBLE_CLICK_EVENT) return "ldouble";
+  }
   switch (t) {
     case OsEventTypeList.SCROLL_BOTTOM_EVENT: return "next";
     case OsEventTypeList.SCROLL_TOP_EVENT: return "prev";
@@ -976,13 +1076,6 @@ async function onTap() {
     st.newsCursor = (st.newsCursor + 1) % st.news.length;
     if (st.newsCursor === 0) refreshMarkets();
     return render();
-  }
-  if (id === "ask") {
-    const a = st.ask;
-    if (a.phase === "listening") return stopAsk();
-    if (a.phase === "thinking" || a.streaming) return; // wait for the whole answer
-    if (a.phase === "answer" && a.page + 1 < askPages(st)) { a.page++; return render(); }
-    return startAsk(a.history.length > 0); // keeps the conversation going; 2x starts fresh
   }
   if (id === "listen") {
     const l = st.listen;
@@ -1034,6 +1127,7 @@ async function goToSleep() {
 function sleepTick() {
   const secs = st.settings.sleepSeconds;
   const idleSince = Math.max(lastInput, st.gym.restEndsAt ?? 0);
+  if (touchTest) return;
   if (!asleep && bridge && secs > 0 && !busy() && Date.now() - idleSince > secs * 1000) goToSleep();
 }
 
@@ -1043,25 +1137,24 @@ async function handle(g: Gesture) {
     asleep = false; // a touch only wakes the display
     return render(true);
   }
+  // Left arm: Ask Claude, over whatever card (or email pop-up) is showing.
+  if (g === "ltap" || g === "ldouble") return askGesture(g === "ldouble");
+  // Press and hold anywhere turns the display off; any touch turns it back on.
+  if (g === "long") { await cancelAsk(); return goToSleep(); }
+  // While Ask is open: a swipe closes it (back to your card); taps work Ask like the left arm.
+  if (st.askOpen && !st.alertView) {
+    if (g === "next" || g === "prev") return closeAsk();
+    return askGesture(g === "double");
+  }
   if (await alertGesture(g)) return;
   const n = st.settings.cards.length;
   const card = st.settings.cards[current];
-  // Press and hold anywhere turns the display off; any touch turns it back on.
-  if (g === "long") { await cancelAsk(); return goToSleep(); }
-  // Leaving the Ask card while it listens cancels the question.
-  if ((g === "next" || g === "prev") && card === "ask") await cancelAsk();
   // Leaving the Listen card turns the mic off and forgets the audio.
   if ((g === "next" || g === "prev") && card === "listen") await stopListen();
   // Listen: double tap goes back to the dots, or stops listening from the dots.
   if (g === "double" && card === "listen" && st.listen.phase !== "off") {
     if (st.listen.phase === "listening" || st.listen.phase === "error") { await stopListen(); return render(); }
     return backToDots();
-  }
-  // Ask: double tap starts a new chat (forgets the conversation).
-  if (g === "double" && card === "ask") {
-    if (st.ask.phase === "listening" || st.ask.phase === "thinking" || st.ask.streaming) return;
-    st.ask = { ...st.ask, phase: "ready", followUp: false, question: "", lines: [], page: 0, history: [], error: null };
-    return render();
   }
   // Day plan: double tap makes a new plan.
   if (g === "double" && card === "brief") return refreshBrief();
@@ -1138,6 +1231,7 @@ async function boot() {
         return;
       }
       if (ev.sysEvent && posture.onSysEvent(bridge!, ev.sysEvent, st.settings.postureCat)) return;
+      if (touchTest) return onTouchTestEvent(ev);
       const g = toGesture(ev);
       if (g) await handle(g);
     });

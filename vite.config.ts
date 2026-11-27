@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { defineConfig, type ProxyOptions } from "vite";
+import { defineConfig, type Plugin, type ProxyOptions } from "vite";
 
 // While testing (npm run dev), calls to /api, /setup and /auth go to the local
 // server (npm run server) and get your access token added here, so the phone
@@ -23,7 +23,24 @@ const withToken: ProxyOptions = {
     proxy.on("proxyReq", (req) => req.setHeader("Authorization", `Bearer ${devToken()}`)),
 };
 
+// Touch test (?touchtest): the page posts each raw glasses event here so it shows in the dev server log.
+const touchLog: Plugin = {
+  name: "touch-log",
+  configureServer(server) {
+    server.middlewares.use("/__touchlog", (req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        console.log(`[touchtest] ${new Date().toISOString()} ${body}`);
+        res.statusCode = 204;
+        res.end();
+      });
+    });
+  },
+};
+
 export default defineConfig(({ command }) => ({
+  plugins: [touchLog],
   // Packaged builds (npm run pack) talk to your deployed server directly, so the
   // address and token are built in; settings on the phone can still override them.
   define: {

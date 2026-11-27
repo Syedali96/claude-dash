@@ -91,7 +91,7 @@ Glasses (G2) ⇄ Even app WebView (phone) runs the Claude Dash web app (Vite + T
 
 ## 4. The glasses app today (v0.8.0)
 
-**Cards, in order: Today → News → Inbox → Gym → Day plan → Ask Claude.** Removed along the way: Home, Tasks, Focus, Teleprompter.
+**Cards, in order: Today → News → Inbox → Gym → Day plan → Listen.** Removed along the way: Home, Tasks, Focus, Teleprompter, Ask Claude (0.14.0: now an overlay opened from the left arm).
 
 ### Gestures
 
@@ -101,11 +101,13 @@ Glasses (G2) ⇄ Even app WebView (phone) runs the Claude Dash web app (Vite + T
 | Tap | The card's action (shown in the footer hint) |
 | Double tap | Go to Today. Special cases below. |
 | Press-and-hold | Display off (blank). Any touch wakes it, and that touch does nothing else. |
+| Left-arm tap (glasses) | Ask Claude over the current card (see below). Ring and right arm keep the gestures above. |
+
+The SDK reports which surface was touched in `sysEvent.eventSource` (1 right arm, 2 ring, 3 left arm), checked on the G2 with `?touchtest` on Nov 26.
 
 Double-tap special cases:
 - **News:** open or close a story.
 - **Day plan:** new plan.
-- **Ask:** follow-up question.
 - **Today, when there are unread alerts:** read the new emails.
 
 ### Auto-sleep
@@ -148,8 +150,9 @@ Double-tap special cases:
   - TODAY'S FOCUS: on its own page, 3–5 one-line bullets of 38 characters or fewer. No clock times for tasks; meetings are the anchors.
   - Inputs: calendar, emails, follow-ups, WHOOP, reminders, phone tasks, today's gym sets, weather.
   - Refreshes on open and every 2 hours. Double tap makes a new one.
-- **Ask Claude**
-  - Tap, speak, then tap again (stops by itself after 15 seconds). Groq transcribes it, then Claude uses tools to answer: `search_email` (all 4 inboxes, full text, Gmail search syntax, at most 2 searches per question), `get_calendar`, `get_whoop`, `get_reminders`, `get_inbox_summary`, `get_news`, plus Anthropic `web_search` (at most 2 uses).
+- **Ask Claude** (an overlay since 0.14.0, flag `st.askOpen`)
+  - A left-arm tap on any card opens Ask over it and starts listening. Left tap again sends; on an answer it pages, then asks a follow-up. Left double tap = new chat. A swipe (ring or right arm) closes Ask (cancels if listening) and returns to the card. Ring taps also work Ask while it's open. Hold = display off.
+  - Speak, then tap again (stops by itself after 15 seconds). Groq transcribes it, then Claude uses tools to answer: `search_email` (all 4 inboxes, full text, Gmail search syntax, at most 2 searches per question), `get_calendar`, `get_whoop`, `get_reminders`, `get_inbox_summary`, `get_news`, plus Anthropic `web_search` (at most 2 uses).
   - The question appears in a top tile with the answer below, paged. Double tap asks a follow-up (the last 3 questions and answers are kept).
   - It's **read-only**: no sending or replying.
   - Read-aloud was removed in 0.9.0 (settings v11).
@@ -171,7 +174,7 @@ Double-tap special cases:
 - Day plan prompt, tasks, gym rest seconds plus history and undo.
 - Connection: server URL (built in) and access token, plus a link to the setup page.
 - Display: brightness ×3, 24-hour clock, hints, read-aloud toggle, and sleep seconds.
-- Settings are stored with `bridge.setLocalStorage`. A `SETTINGS_VERSION` (currently **10**) with migrations adds or removes cards on update.
+- Settings are stored with `bridge.setLocalStorage`. A `SETTINGS_VERSION` (currently **13**) with migrations adds or removes cards on update.
 
 ## 5. Even Hub SDK facts learned (v0.0.16)
 
@@ -228,7 +231,8 @@ npx wrangler kv key delete --binding TOKENS --remote "<key>"   # clear a cache (
 - 0.11.0: faster Listen: background transcription every 30 s, silence dropped, raw audio instead of base64, streamed answer (topic first).
 - 0.12.0 (Nov 26): speed. Worker returns saved copies at once and refreshes in the background (`worker/cache.ts`, keys `inbox:v2`, `whoop:today:v2`, `markets:v2`); a 15-minute cron (`scheduled` in `worker/index.ts`, `triggers` in `wrangler.jsonc`) rebuilds inbox, news, WHOOP and markets, and the inbox only re-asks Claude when the threads changed (SHA-1 signature). Ask streams: multipart in (raw audio), reply is `QUESTION: ...\n` then text, `\x1e` = drop the text before a lookup. Gym also sends raw audio (multipart; JSON still accepted). Streams send `Content-Encoding: identity` (gzip held Listen/Ask text until the end). Email alerts and the WHOOP tip use `claude-haiku-5-5` (about 1 s faster, measured); gym and everything else stay on Opus. Phone saves the last screens (`claude-dash-snapshot`) and shows them at launch, with "updated h:mm" in the footer when over 5 minutes old; the day plan isn't remade at launch if under 2 hours old. Redraws only swap changed text unless the layout changed or more than 3 boxes changed. Listen dots are smaller and animate (one bright dot steps every 0.5 s). Ali chose to keep background polling while asleep as it was.
 - 0.13.0: Listen answers first and searches after ("> LATEST" line), 10-second background chunks, 2 s max wait at tap.
-- Testing hooks (dev only): `?savedtest` shows the "updated" footer; `?listentest=<transcript>` shows a Listen answer, `?listentest=dots` the listening screen; `LOCAL_API=1 npm run dev` uses the local Worker; `?gymseed` loads sample history, `?gymtest=a|b` runs typed gym commands, `?asktest=q1|q2` asks typed questions in one chat.
+- 0.14.0: Ask Claude card removed; a left-arm tap opens Ask over any card (`st.askOpen`). Settings v13 drops "ask" from saved card lists. Built together with the posture cat.
+- Testing hooks (dev only): `?savedtest` shows the "updated" footer; `?listentest=<transcript>` shows a Listen answer, `?listentest=dots` the listening screen; `LOCAL_API=1 npm run dev` uses the local Worker; `?gymseed` loads sample history, `?gymtest=a|b` runs typed gym commands, `?asktest=q1|q2` asks typed questions in one chat (opens the Ask overlay).
 
 ## 7. Known limits and gotchas
 

@@ -93,6 +93,7 @@ export interface DashState {
   inbox: { data: InboxData | null; loading: boolean; error: string | null; page: number };
   whoop: WhoopToday | null;
   saved: Partial<Record<CardId, number>>; // cards still showing last launch's data: when it was fetched (ms)
+  askOpen: boolean; // Ask Claude is open over the current card (a left-arm tap opens it)
   ask: {
     phase: "ready" | "listening" | "thinking" | "answer" | "error";
     followUp: boolean;
@@ -609,7 +610,7 @@ function askBody(st: DashState): Body {
       return {
         tiles: [
           box(8, 2, 560, 42, ["●  LISTENING..."]),
-          box(ANSWER.x, ANSWER.y, ANSWER.w, ANSWER.h, [a.followUp ? "Ask your follow-up, then tap." : "Speak your question, then tap."], { border: false, capture: true }),
+          box(ANSWER.x, ANSWER.y, ANSWER.w, ANSWER.h, [a.followUp ? "Ask your follow-up, then tap the left arm." : "Speak your question, then tap the left arm."], { border: false, capture: true }),
         ],
       };
     case "thinking":
@@ -621,10 +622,10 @@ function askBody(st: DashState): Body {
       return { tiles: [q(a.question), box(ANSWER.x, ANSWER.y, ANSWER.w, ANSWER.h, p[Math.min(a.page, p.length - 1)], { border: false, capture: true })] };
     }
     case "error":
-      return message(`${a.error ?? "Something went wrong."}\n\nTap to try again${a.history.length ? ", double tap for a new chat" : ""}.`);
+      return message(`${a.error ?? "Something went wrong."}\n\nTap the left arm to try again${a.history.length ? ", double tap it for a new chat" : ""}.`);
     default:
       return {
-        tiles: [full(["NEW CHAT", "Tap and ask anything, like:", "", '"What did Paul say about the 11/26 post?"',
+        tiles: [full(["NEW CHAT", "Tap the left arm and ask anything, like:", "", '"What did Paul say about the 11/26 post?"',
           '"When is my next meeting with Brandon?"', '"Summarize what Apple Support wants."'])],
       };
   }
@@ -728,24 +729,6 @@ export const CARDS: Record<CardId, CardDef> = {
     },
     body: gymBody,
   },
-  ask: {
-    title: (st) => {
-      const n = st.ask.history.length;
-      return n ? `ASK CLAUDE  ·  chat · ${n} question${n === 1 ? "" : "s"}` : "ASK CLAUDE  ·  new chat";
-    },
-    tapHint: (st) => {
-      const a = st.ask;
-      if (a.phase === "listening") return "tap  done";
-      if (a.phase === "thinking" || a.streaming) return "";
-      if (a.phase === "answer") {
-        const n = askPages(st);
-        const more = a.page + 1 < n;
-        return `${n > 1 ? `${a.page + 1}/${n}   ` : ""}tap  ${more ? "more" : "follow-up"}   2x  new chat`;
-      }
-      return a.history.length ? "tap  follow-up   2x  new chat" : "tap  ask";
-    },
-    body: askBody,
-  },
   listen: {
     title: () => "LISTEN",
     tapHint: (st) => {
@@ -781,16 +764,37 @@ export const CARDS: Record<CardId, CardDef> = {
   },
 };
 
+/** Ask Claude: not a card any more, an overlay a left-arm tap opens over whatever card you're on. */
+export const ASK: CardDef = {
+  title: (st) => {
+    const n = st.ask.history.length;
+    return n ? `ASK CLAUDE  ·  chat · ${n} question${n === 1 ? "" : "s"}` : "ASK CLAUDE  ·  new chat";
+  },
+  tapHint: (st) => {
+    const a = st.ask;
+    if (a.phase === "listening") return "L tap  send   swipe  back";
+    if (a.phase === "thinking" || a.streaming) return "swipe  back";
+    if (a.phase === "answer") {
+      const n = askPages(st);
+      const more = a.page + 1 < n;
+      return `${n > 1 ? `${a.page + 1}/${n}   ` : ""}L tap  ${more ? "more" : "follow-up"}   swipe  back`;
+    }
+    return `L tap  ask   ${a.history.length ? "L 2x  new chat   " : ""}swipe  back`;
+  },
+  body: askBody,
+};
+
 const SAVED_LABEL_MS = 5 * 60_000; // younger saved data needs no label
 
 /** Footer: page dots on the left, a short dim hint on the right. */
 export function footer(st: DashState, current: number): { dots: string; hint: string } {
   // On the Listen card, "● ● ●" in the corner means the mic is still on.
-  const listening = st.settings.cards[current] === "listen" && st.listen.phase !== "off" && !alertFrame(st);
+  const listening = st.settings.cards[current] === "listen" && st.listen.phase !== "off" && !alertFrame(st) && !st.askOpen;
   const dots = listening ? "● ● ●" : st.settings.cards.map((_, i) => (i === current ? "●" : "○")).join(" ");
   if (!st.settings.showHints) return { dots, hint: "" };
   const alert = alertFrame(st);
   if (alert) return { dots, hint: alert.hint };
+  if (st.askOpen) return { dots, hint: ASK.tapHint(st) };
   // Last launch's data, still refreshing (or offline): say how old it is instead of the hint.
   const saved = st.saved[st.settings.cards[current]];
   if (saved && st.now.getTime() - saved > SAVED_LABEL_MS) return { dots, hint: `updated ${clock(new Date(saved), st.settings.use24h)}` };
@@ -799,7 +803,7 @@ export function footer(st: DashState, current: number): { dots: string; hint: st
 
 /** Header: card title on the left, time + battery on the right. */
 export function header(st: DashState, current: number, battery: number | null): { title: string; status: string } {
-  const title = alertFrame(st)?.title ?? CARDS[st.settings.cards[current]].title(st);
+  const title = alertFrame(st)?.title ?? (st.askOpen ? ASK : CARDS[st.settings.cards[current]]).title(st);
   const status = [clock(st.now, st.settings.use24h), battery != null ? `${battery}%` : ""].filter(Boolean).join("   ");
   return { title, status };
 }

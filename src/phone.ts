@@ -3,7 +3,7 @@ import { setupUrl } from "./api";
 import type { Frame } from "./layout";
 import { CARD_LABELS, type CardId, type LoggedSet, type Settings } from "./settings";
 
-type Gesture = "next" | "prev" | "tap" | "double" | "long";
+type Gesture = "next" | "prev" | "tap" | "double" | "long" | "ltap" | "ldouble";
 
 interface Hooks {
   onChange(s: Settings): void;
@@ -12,7 +12,7 @@ interface Hooks {
 }
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
-const ALL: CardId[] = ["agenda", "news", "inbox", "gym", "brief", "ask", "listen"];
+const ALL: CardId[] = ["agenda", "news", "inbox", "gym", "brief", "listen"];
 
 export function mountPhoneUI(initial: Settings, hooks: Hooks) {
   let s = structuredClone(initial);
