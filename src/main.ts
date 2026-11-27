@@ -9,7 +9,7 @@ import {
   waitForEvenAppBridge,
 } from "@evenrealities/even_hub_sdk";
 import { ApiError, api, apiStream } from "./api";
-import { ASK, alertFrame, alertPages, askPages, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, reminderPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, visibleCards, type WhoopToday } from "./cards";
+import { ASK, alertFrame, alertPages, askPages, type Batteries, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, reminderPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, visibleCards, type WhoopToday } from "./cards";
 import { drawBlank, drawFrame, type Frame, imagesOf, MENU, shapeChanged, tileText, updateRegion, updateTile } from "./layout";
 import type { CardId } from "./settings";
 import * as widgets from "./widgets";
@@ -23,7 +23,9 @@ type Gesture = "next" | "prev" | "tap" | "double" | "long" | "ltap" | "ldouble";
 
 let bridge: EvenAppBridge | null = null;
 let current = 0;
-let battery: number | null = null;
+const battery: Batteries = { glasses: null, ring: null };
+let glassesSn: string | null = null; // from getDeviceInfo: status updates from any other device are the ring's
+let ringSn: string | null = null;
 let lastFrame: Frame | null = null;
 const st: DashState = {
   settings: await loadSettings(null),
@@ -66,6 +68,22 @@ function keepCard(update: () => void) {
 }
 
 function frame(): Frame {
+  return withBatteries(cardFrame());
+}
+
+/**
+ * Draw the batteries as a small picture next to the time when there's a free picture box
+ * (4 per page, the cat's included); otherwise they stay text in the status line.
+ */
+function withBatteries(f: Frame): Frame {
+  if (battery.glasses == null || f.status === " ") return f;
+  const images = f.body.images ?? [];
+  if (images.length + (f.cat ? 1 : 0) >= widgets.MAX_IMAGES) return f;
+  const status = header(st, current, battery, true).status;
+  return { ...f, status, body: { ...f.body, images: [widgets.batteryWidget(battery.glasses, battery.ring), ...images] } };
+}
+
+function cardFrame(): Frame {
   const id = cardId();
   // Ask Claude covers the current card (an email pop-up still goes on top).
   if (st.askOpen && !st.alertView) {
@@ -79,7 +97,7 @@ function frame(): Frame {
   if (alert?.body) return { ...header(st, current, battery), body: alert.body, ...footer(st, current), cat: false }; // opened email
   const card = st.askOpen ? ASK.body(st) : CARDS[id].body(st);
   // A new, unopened email: a drawn box over the card you're on.
-  const body = alert?.image ? { tiles: card.tiles, images: [...(card.images ?? []).slice(0, widgets.MAX_IMAGES - 1), alert.image] } : card;
+  const body = alert?.image ? { tiles: card.tiles, images: [...(card.images ?? []).slice(0, widgets.CARD_IMAGES - 1), alert.image] } : card;
   return { ...header(st, current, battery), body, ...footer(st, current), cat: !alert && !!posture.catPose() };
 }
 
@@ -115,6 +133,18 @@ async function render(force = false) {
   lastFrame = f;
   widgets.sync(bridge, imagesOf(f)); // sends only pictures that changed, in the background
   if (f.cat) await posture.syncImage(bridge);
+}
+
+// ---------- batteries ----------
+
+/** Dev only: ?batterytest=82,64 fakes the glasses and ring levels (ring "-" = no ring). */
+function batteryDevTest() {
+  if (!import.meta.env.DEV) return;
+  const v = new URLSearchParams(location.search).get("batterytest");
+  if (!v) return;
+  const [g, r] = v.split(",");
+  battery.glasses = Number(g);
+  battery.ring = r == null || r === "-" ? null : Number(r);
 }
 
 // ---------- posture cat ----------
@@ -1247,9 +1277,23 @@ async function boot() {
       const g = toGesture(ev);
       if (g) await handle(g);
     });
+    bridge.getDeviceInfo().then((d) => {
+      if (d?.isGlasses()) glassesSn = d.sn;
+      else if (d?.isRing()) ringSn = d.sn;
+      console.log(`[battery] device info: ${d?.model} ${d?.sn} ${d?.status?.batteryLevel}`);
+    }).catch(() => {});
     bridge.onDeviceStatusChanged((s) => {
+      // Logged so a real-glasses run shows whether the R1 ring ever reports its battery here.
+      console.log(`[battery] status: sn=${s.sn} ${s.connectType} ${s.batteryLevel}% charging=${s.isCharging}`);
+      const isRing = !!s.sn && (s.sn === ringSn || (glassesSn != null && s.sn !== glassesSn));
+      if (isRing) {
+        ringSn = s.sn;
+        const level = s.connectType === DeviceConnectType.Connected && typeof s.batteryLevel === "number" ? s.batteryLevel : null;
+        if (level !== battery.ring) { battery.ring = level; render(); }
+        return;
+      }
       if (s.connectType === DeviceConnectType.Connected && typeof s.batteryLevel === "number") {
-        battery = s.batteryLevel;
+        battery.glasses = s.batteryLevel;
         render();
       }
     });
@@ -1260,6 +1304,7 @@ async function boot() {
   await gymDevTest();
   await listenDevTest();
   savedDevTest();
+  batteryDevTest();
   if (import.meta.env.DEV) posture.devTest(new URLSearchParams(location.search).get("posturetest"));
   // Dev only: ?card=news opens that card; ?alertdemo shows a sample new-email box over it.
   if (import.meta.env.DEV) {

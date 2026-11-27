@@ -23,8 +23,8 @@ export const BODY = { x: 0, y: 42, w: 576, h: 202 };
 export const PAD = { tile: 6, free: 4 };
 
 export const REGION = {
-  title: { id: 1, name: "title", x: 0, y: 0, w: 410, h: 39 },
-  status: { id: 2, name: "status", x: 430, y: 0, w: 146, h: 39 }, // time + battery, tucked right
+  title: { id: 1, name: "title", x: 0, y: 0, w: 382, h: 39 },
+  status: { id: 2, name: "status", x: 386, y: 0, w: 190, h: 39 }, // time, then the drawn batteries (or "82%  R 64" as text)
   dots: { id: 3, name: "dots", x: 0, y: 246, w: 196, h: 42 }, // room for 7 card dots
   hint: { id: 4, name: "hint", x: 196, y: 246, w: 380, h: 42 },
 } as const;
@@ -42,15 +42,15 @@ const menuObject = new MenuContainerProperty({
 
 export interface Frame {
   title: string; // "TODAY  ·  Wed, Nov 18"
-  status: string; // "7:13 PM   82%"
+  status: string; // "7:13 PM" (batteries drawn next to it) or "7:13 PM   82%  R 64"
   body: Body;
   dots: string; // "● ○ ○ ○ ○"
   hint: string; // "2/2   tap  more"
   cat?: boolean; // posture cat pop-up in the bottom-right corner
 }
 
-/** The drawn pictures on a frame (at most 3; the cat has its own box). */
-export const imagesOf = (f: Frame): Img[] => (f.body.images ?? []).slice(0, MAX_IMAGES);
+/** The drawn pictures on a frame (4 per page at most, the cat's box included). */
+export const imagesOf = (f: Frame): Img[] => (f.body.images ?? []).slice(0, MAX_IMAGES - (f.cat ? 1 : 0));
 
 /**
  * Text tiles that sit under a covering picture (the email box) are blanked, so their text

@@ -22,8 +22,9 @@ export interface Img {
   cover?: boolean; // sits over text (the email box): text tiles under it are blanked
 }
 
-export const IMG_ID = 20; // image containers use ids 20, 21, 22 (the cat is 30)
-export const MAX_IMAGES = 3; // the G2 takes 4 image containers per page; one is kept for the cat
+export const IMG_ID = 20; // image containers use ids 20..23 (the cat is 30)
+export const MAX_IMAGES = 4; // the G2 takes 4 image containers per page, the cat included
+export const CARD_IMAGES = 3; // a card's own widgets (+ the email box) use at most 3
 
 export function imgContainer(img: Img, i: number): ImageContainerProperty {
   return new ImageContainerProperty({
@@ -138,6 +139,38 @@ export function emailWidget(x: number, y: number, a: { from: string; line: strin
       wrapClamped(g.measure, a.summary.replace(/\s+/g, " "), body, 264, 3).forEach((l, i) => g.text(l, 12, 70 + i * 17, body, G.primary, "left", "middle"));
       g.hline(10, 278, 120, G.hairline);
       g.text("TAP  READ     2X  CLOSE", 144, 132, st(11, 700, MONO), G.secondary, "center", "middle");
+    },
+  };
+}
+
+/** Where the battery picture sits: top right, just after the time. */
+export const BATTERY_BOX = { x: 478, y: 9, w: 98, h: 22 };
+
+/** One small battery bar (outline, nub, fill). Empty-ish bars stay readable: at least 1 px of fill. */
+function batteryBar(g: GlyphRaster, x: number, level: number) {
+  g.roundRect({ x: x + 0.5, y: 6.5, width: 21, height: 10 }, 2, { stroke: G.max, width: 1.3 });
+  g.rect({ x: x + 22, y: 9.5, width: 2, height: 4 }, { fill: G.max });
+  const w = Math.max(1, Math.round((17 * Math.min(100, Math.max(0, level))) / 100));
+  g.rect({ x: x + 2.5, y: 8.5, width: w, height: 6 }, { fill: G.max });
+}
+
+/** Header: a tiny glasses icon + battery bar, then (when the ring reports in) a ring icon + bar. */
+export function batteryWidget(glasses: number, ring: number | null): Img {
+  const b = BATTERY_BOX;
+  // Round to 5% so the picture isn't resent for every 1% change.
+  const q = (n: number) => Math.round(n / 5) * 5;
+  return {
+    ...b, key: `batt:${q(glasses)}:${ring == null ? "-" : q(ring)}`,
+    draw: (g) => {
+      const line = { stroke: G.max, width: 1.2 };
+      g.circle(5.5, 11.5, 4.2, line);
+      g.circle(16.5, 11.5, 4.2, line);
+      g.line(9.7, 11, 12.3, 11, line);
+      batteryBar(g, 24, q(glasses));
+      if (ring == null) return;
+      g.circle(64, 11.5, 5, line);
+      g.circle(64, 11.5, 2.2, { stroke: G.max, width: 1.1 });
+      batteryBar(g, 73, q(ring));
     },
   };
 }

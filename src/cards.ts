@@ -900,10 +900,19 @@ export function footer(st: DashState, current: number): { dots: string; hint: st
   return { dots, hint: CARDS[id].tapHint(st) };
 }
 
-/** Header: card title on the left, time + battery on the right. */
-export function header(st: DashState, current: number, battery: number | null): { title: string; status: string } {
+/** Battery levels (0-100) of the glasses and the R1 ring; null until the device reports in. */
+export interface Batteries { glasses: number | null; ring: number | null }
+
+/**
+ * Header: card title on the left, time + battery on the right. With `drawn`, the batteries are a
+ * small picture next to the time (see batteryWidget), so the text is just the time; otherwise
+ * they're text: "82%" for the glasses and "R 64" for the ring.
+ */
+export function header(st: DashState, current: number, batt: Batteries, drawn = false): { title: string; status: string } {
   const cards = visibleCards(st);
   const title = alertFrame(st)?.title ?? (st.askOpen ? ASK : CARDS[cards[current] ?? cards[0]]).title(st);
-  const status = [clock(st.now, st.settings.use24h), battery != null ? `${battery}%` : ""].filter(Boolean).join("   ");
-  return { title, status };
+  const time = clock(st.now, st.settings.use24h);
+  if (drawn) return { title, status: time };
+  const levels = [batt.glasses != null ? `${batt.glasses}%` : "", batt.ring != null ? `R ${batt.ring}` : ""].filter(Boolean).join("  ");
+  return { title, status: [time, levels].filter(Boolean).join("   ") };
 }
