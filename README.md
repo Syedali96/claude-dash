@@ -71,3 +71,7 @@ ASCII for bars.
   `server/claude.ts` somewhere (any small Node host) and point `/api/brief` at it.
   Don't put the API key in the page itself.
 - Each brief is a single `claude-opus-5-5` call at low effort, so it costs a fraction of a cent.
+
+## Credits
+
+Drawn widgets use [Glyph](https://github.com/gabrielevierti/glyph) (MIT, (c) 2026 theboredprog). The posture cat comes from [Posture Cat](https://github.com/unicco/even-g2-posture) (MIT, (c) 2026 Kansai Takako). See THIRD_PARTY_NOTICES.md.

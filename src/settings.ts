@@ -2,7 +2,7 @@
 // Stored through the Even app's storage, so it survives restarts.
 import type { EvenAppBridge } from "@evenrealities/even_hub_sdk";
 
-export type CardId = "agenda" | "news" | "inbox" | "gym" | "brief" | "listen";
+export type CardId = "agenda" | "news" | "inbox" | "gym" | "reminders" | "listen";
 
 export const CARD_LABELS: Record<CardId, string> = {
   agenda: "Today (schedule, WHOOP + inbox, email alerts)",
@@ -10,7 +10,7 @@ export const CARD_LABELS: Record<CardId, string> = {
   listen: "Listen (tap to learn about your conversation)",
   inbox: "Inbox (reply + follow up)",
   gym: "Gym log (voice)",
-  brief: "Day plan (Claude + WHOOP)",
+  reminders: "Reminders (today's iPhone reminders; hidden when none)",
 };
 
 export interface Settings {
@@ -20,8 +20,6 @@ export interface Settings {
   serverUrl: string;
   accessToken: string;
   cards: CardId[]; // order on the glasses; leave one out to hide it
-  briefPrompt: string;
-  tasks: string[];
   sleepSeconds: number; // blank the glasses after this long with no input (0 = never)
   rest: { heavy: number; compound: number; isolation: number }; // seconds by lift type; WHOOP recovery adds to it
   use24h: boolean;
@@ -31,20 +29,13 @@ export interface Settings {
   postureCat: boolean; // a cat pops up when you slouch (uses the glasses' motion sensor)
 }
 
-export const SETTINGS_VERSION = 13;
-
-export const DAY_PLAN_PROMPT = "Suggest what I should focus on for the rest of today.";
-const V5_PROMPT =
-  "Plan the rest of my day: meetings, tasks, emails to answer, and when to hit the gym, matched to my energy. End with what WHOOP says I should do.";
-const OLD_PROMPT = "Give me a focused brief for the next few hours: what to do first and anything to watch out for.";
+export const SETTINGS_VERSION = 14;
 
 export const DEFAULTS: Settings = {
   version: SETTINGS_VERSION,
   serverUrl: "",
   accessToken: "",
-  cards: ["agenda", "news", "inbox", "gym", "brief", "listen"],
-  briefPrompt: DAY_PLAN_PROMPT,
-  tasks: ["Reply to investor emails", "Review reel cuts", "Gym at 6pm"],
+  cards: ["agenda", "news", "inbox", "gym", "reminders", "listen"],
   sleepSeconds: 30,
   rest: { heavy: 150, compound: 120, isolation: 60 },
   use24h: false,
@@ -65,6 +56,10 @@ export async function loadSettings(bridge: EvenAppBridge | null): Promise<Settin
   if (!raw) return structuredClone(DEFAULTS);
   try {
     const parsed = JSON.parse(raw) as Partial<Settings>;
+    // v14 turned the Day plan card into Reminders (same spot) and dropped its prompt and tasks.
+    if ((parsed.version ?? 1) < 14 && parsed.cards) parsed.cards = parsed.cards.map((c) => ((c as string) === "brief" ? "reminders" : c));
+    delete (parsed as Record<string, unknown>).briefPrompt;
+    delete (parsed as Record<string, unknown>).tasks;
     const merged = { ...structuredClone(DEFAULTS), ...parsed, brightness: { ...DEFAULTS.brightness, ...parsed.brightness }, rest: { ...DEFAULTS.rest, ...parsed.rest } };
     // v11 replaced one rest time with rest by lift type, and dropped read-aloud (the G2 has no speaker).
     delete (merged as Partial<Settings> & { restSeconds?: number; speakAnswers?: boolean }).restSeconds;
@@ -81,15 +76,12 @@ export async function loadSettings(bridge: EvenAppBridge | null): Promise<Settin
       const i = merged.cards.indexOf("inbox");
       merged.cards.splice(i + 1, 0, "gym");
     }
-    // v5 turned the brief into a personal day plan (only if you never edited the prompt).
-    if ((parsed.version ?? 1) < 5 && merged.briefPrompt === OLD_PROMPT) merged.briefPrompt = DAY_PLAN_PROMPT;
     // v7 removed Tasks and Focus; v8 removed Home and Teleprompter. Drop unknown cards.
     merged.cards = merged.cards.filter((c) => c in CARD_LABELS);
     if (!merged.cards.length) merged.cards = [...DEFAULTS.cards];
     // v9 gave News its own card (right after Today) and simplified the day plan prompt.
     if ((parsed.version ?? 1) < 9) {
       if (!merged.cards.includes("news")) merged.cards.splice(merged.cards.indexOf("agenda") + 1, 0, "news");
-      if (merged.briefPrompt === V5_PROMPT || merged.briefPrompt === OLD_PROMPT) merged.briefPrompt = DAY_PLAN_PROMPT;
     }
     // v10 added the Ask Claude card at the end.
     if ((parsed.version ?? 1) < 10 && !merged.cards.includes("ask" as CardId)) merged.cards.push("ask" as CardId);

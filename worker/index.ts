@@ -1,12 +1,11 @@
 // Claude Dash server (Cloudflare Worker). Every /api route needs your private
 // APP_TOKEN, so only your glasses app can read your calendar and mail through it.
-import Anthropic from "@anthropic-ai/sdk";
 import { ask } from "./ask";
 import { alerts, inbox } from "./gmail";
 import { gymCommand, parseSet } from "./gym";
 import { listen, listenTranscribe } from "./listen";
 import { article, markets, news } from "./news";
-import { bedtime, finishWhoop, startWhoop, whoopConnected, whoopText, whoopTip, whoopToday } from "./whoop";
+import { bedtime, finishWhoop, startWhoop, whoopConnected, whoopTip, whoopToday } from "./whoop";
 import { ACCOUNTS, type AccountKey, agenda, finishAuth, isConnected, startAuth } from "./google";
 
 export interface Env {
@@ -118,15 +117,13 @@ export default {
         case "/api/news/article":
           return json(await article(env, Number(url.searchParams.get("n") ?? 0), url.searchParams.get("line") ?? undefined));
         case "/api/reminders":
-          return reminders(req, env);
+          return reminders(req, env, url);
         case "/api/gym/parse":
           if (req.method !== "POST") return json({ error: "POST only" }, 405);
           return json(await parseSet(req, env));
         case "/api/gym/command":
           if (req.method !== "POST") return json({ error: "POST only" }, 405);
           return json(await gymCommand(req, env));
-        case "/api/brief":
-          return brief(req, env, ctx);
         default:
           return json({ error: "Not found" }, 404);
       }
@@ -149,31 +146,21 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-// ---------- Claude brief ----------
-
-interface BriefRequest {
-  prompt: string;
-  now: string;
-  weather?: string;
-  tasks: string[];
-  gym?: string[]; // today's logged sets, e.g. "Bench Press 185x8"
-  dayStart?: string; // ISO, the phone's local midnight
-  dayEnd?: string;
-  timeZone?: string; // e.g. "America/Los_Angeles"
-}
-
-const SYSTEM = `You suggest what a startup founder should do with the rest of their day, shown on smart glasses
-(40 characters per line). Their reminders are already listed above your part, so don't repeat that list.
-Write 3 to 5 bullets, each starting with "- ", in the order to do them. Each bullet is one clear action
-in plain words that fits on ONE line: at most 38 characters including the "- ", e.g. "- Reply to Paul: 11/26 post time".
-Draw on emails to answer or follow up, meetings to prep for (name the meeting, e.g. "before your 6pm with
-Brandon"), reminders worth doing first, and the gym matched to their WHOOP recovery.
-Never give clock times for tasks. No headers, no markdown, no emoji. Never invent meetings or tasks.`;
-
 // ---------- iPhone Reminders (sent by an iOS Shortcut) ----------
 
-async function reminders(req: Request, env: Env): Promise<Response> {
-  if (req.method === "GET") return json(JSON.parse((await env.TOKENS.get("reminders:today")) ?? '{"items":[]}'));
+/** The calendar day of a moment in a time zone, e.g. "2026-11-27". */
+const dayIn = (t: Date, tz: string) => t.toLocaleDateString("en-CA", { timeZone: tz });
+
+async function reminders(req: Request, env: Env, url: URL): Promise<Response> {
+  if (req.method === "GET") {
+    // `today` is true only when the Shortcut sent the list today (Ali's time zone), so the
+    // glasses hide the Reminders card instead of showing yesterday's list.
+    const saved = JSON.parse((await env.TOKENS.get("reminders:today")) ?? '{"items":[]}') as { items: string[]; at?: string };
+    let tz = url.searchParams.get("tz") || "America/New_York";
+    try { dayIn(new Date(), tz); } catch { tz = "America/New_York"; }
+    const today = !!saved.at && dayIn(new Date(saved.at), tz) === dayIn(new Date(), tz);
+    return json({ ...saved, today });
+  }
   if (req.method !== "POST") return json({ error: "GET or POST" }, 405);
   // Accept {"items": [...]}, {"items": "one\ntwo"}, or plain text with one reminder per line.
   const raw = await req.text();
@@ -185,69 +172,6 @@ async function reminders(req: Request, env: Env): Promise<Response> {
     .slice(0, 40);
   await env.TOKENS.put("reminders:today", JSON.stringify({ items: list, at: new Date().toISOString() }));
   return json({ ok: true, count: list.length });
-}
-
-async function dayContext(env: Env, body: BriefRequest, ctx: ExecutionContext): Promise<string> {
-  const lines = [`Now: ${body.now}`];
-  if (body.weather) lines.push(`Weather: ${body.weather}`);
-  const [events, whoop, ib] = await Promise.all([
-    body.dayStart && body.dayEnd ? agenda(env, body.dayStart, body.dayEnd).catch(() => null) : null,
-    whoopToday(env, ctx).catch(() => null),
-    inbox(env, false, ctx).catch(() => null), // the saved copy (kept fresh by the timer)
-  ]);
-  if (events) {
-    const left = events.filter((e) => e.allDay || new Date(e.end).getTime() > Date.now());
-    const tz = body.timeZone || "UTC";
-    const fmt = (iso: string) => new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: tz });
-    lines.push(
-      left.length
-        ? `Meetings left today:\n${left.map((e) => `- ${e.allDay ? "all day" : `${fmt(e.start)}-${fmt(e.end)}`} ${e.title}`).join("\n")}`
-        : "Meetings left today: none",
-    );
-  }
-  lines.push(whoop ? `WHOOP: ${whoopText(whoop)}` : "WHOOP: not connected");
-  if (ib) {
-    if (ib.reply.length) lines.push(`Emails to answer:\n${ib.reply.slice(0, 5).map((i) => `- ${i.line}`).join("\n")}`);
-    if (ib.followup.length) lines.push(`To follow up:\n${ib.followup.slice(0, 3).map((i) => `- ${i.line}`).join("\n")}`);
-  }
-  const rem = JSON.parse((await env.TOKENS.get("reminders:today")) ?? "null") as { items: string[]; at: string } | null;
-  const fresh = rem && Date.now() - Date.parse(rem.at) < 18 * 3_600_000;
-  if (fresh && rem!.items.length) lines.push(`Reminders due today (iPhone):\n${rem!.items.map((t) => `- ${t}`).join("\n")}`);
-  if (body.tasks?.length) lines.push(`Other tasks:\n${body.tasks.map((t) => `- ${t}`).join("\n")}`);
-  lines.push(body.gym?.length ? `Gym today, already done: ${body.gym.join(", ")}` : "Gym today: not yet");
-  return lines.join("\n");
-}
-
-async function brief(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  if (req.method !== "POST") return json({ error: "POST only" }, 405);
-  if (!env.ANTHROPIC_API_KEY) return json({ error: "Claude key missing on the server." }, 500);
-  const body = (await req.json()) as BriefRequest;
-  const context = await dayContext(env, body, ctx);
-
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  try {
-    const response = await client.beta.messages.create({
-      model: "claude-opus-5-5",
-      max_tokens: 2000,
-      output_config: { effort: "low" },
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
-      system: SYSTEM,
-      messages: [{ role: "user", content: `${body.prompt}\n\n${context}` }],
-    });
-    if (response.stop_reason === "refusal") return json({ text: "Claude declined this one. Try a different prompt in settings." });
-    const plan = response.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("").trim();
-    // Reminders are listed exactly as you wrote them; Claude only writes the suggestions.
-    const rem = JSON.parse((await env.TOKENS.get("reminders:today")) ?? "null") as { items: string[]; at: string } | null;
-    const fresh = rem && Date.now() - Date.parse(rem.at) < 18 * 3_600_000 ? rem.items : [];
-    const reminderLines = fresh.length ? fresh.map((r) => `- ${r}`) : ["- Nothing due today"];
-    return json({ text: ["REMINDERS", ...reminderLines, "", "TODAY'S FOCUS", plan].join("\n") });
-  } catch (err) {
-    if (err instanceof Anthropic.AuthenticationError) return json({ error: "Claude key is invalid." }, 502);
-    if (err instanceof Anthropic.RateLimitError) return json({ error: "Rate limited. Try again in a minute." }, 502);
-    if (err instanceof Anthropic.APIError) return json({ error: `Claude API error ${err.status}.` }, 502);
-    throw err;
-  }
 }
 
 // ---------- one-time setup page (open on your Mac, not in the Even app) ----------

@@ -26,12 +26,15 @@ interface Candidate {
   subject: string;
   snippet: string;
   ageHours: number;
+  lastAt: number; // ms, the thread's newest message
 }
 
 export interface InboxItem {
   line: string;
   tag: string;
   ageHours: number;
+  id?: string; // "account:threadId" (for dismissing; not shown)
+  lastAt?: number; // ms, the thread's newest message
 }
 
 export interface Inbox {
@@ -119,7 +122,8 @@ async function candidates(env: Env, account: AccountKey): Promise<Candidate[]> {
     const msgs = (t.messages ?? []).filter((m) => !m.labelIds?.includes("DRAFT"));
     const last = msgs.at(-1);
     if (!last) continue;
-    const ageHours = Math.round((now - Number(last.internalDate ?? now)) / 3_600_000);
+    const lastAt = Number(last.internalDate ?? now);
+    const ageHours = Math.round((now - lastAt) / 3_600_000);
     const subject = header(msgs[0], "Subject") || "(no subject)";
     const snippet = decode(last.snippet ?? "").slice(0, 220);
     const fromMe = last.labelIds?.includes("SENT");
@@ -127,12 +131,12 @@ async function candidates(env: Env, account: AccountKey): Promise<Candidate[]> {
     if (!fromMe && last.labelIds?.includes("INBOX")) {
       const from = header(last, "From");
       if (ROBOT.test(from) || header(last, "List-Unsubscribe") || OWN.has(address(from))) continue;
-      out.push({ id: `${account}:${t.id}`, kind: "reply", account, person: displayName(from), subject, snippet, ageHours });
+      out.push({ id: `${account}:${t.id}`, kind: "reply", account, person: displayName(from), subject, snippet, ageHours, lastAt });
     } else if (fromMe && ageHours >= 24 && ageHours <= 24 * 7) {
       const to = header(last, "To");
       const toAddr = address(to.split(",")[0] ?? "");
       if (!toAddr || OWN.has(toAddr) || ROBOT.test(to)) continue;
-      out.push({ id: `${account}:${t.id}`, kind: "followup", account, person: displayName(to), subject, snippet, ageHours });
+      out.push({ id: `${account}:${t.id}`, kind: "followup", account, person: displayName(to), subject, snippet, ageHours, lastAt });
     }
   }
   return out;
@@ -233,7 +237,7 @@ async function build(env: Env): Promise<Built> {
   const toItems = (list: { id: string; line: string }[]) =>
     list.flatMap(({ id, line }) => {
       const c = byId.get(id);
-      return c ? [{ line: line.slice(0, 40), tag: TAGS[c.account], ageHours: c.ageHours }] : [];
+      return c ? [{ line: line.slice(0, 40), tag: TAGS[c.account], ageHours: c.ageHours, id: c.id, lastAt: c.lastAt }] : [];
     });
   const result: Inbox = {
     at: new Date().toISOString(),
@@ -250,7 +254,62 @@ export async function inbox(env: Env, fresh: boolean, ctx?: Ctx): Promise<Inbox>
   const b = fresh
     ? await refresh(env, CACHE_KEY, () => build(env), KEEP_SECONDS)
     : await swr(env, ctx, CACHE_KEY, FRESH_MS, () => build(env), KEEP_SECONDS);
-  return b.result;
+  return withoutDismissed(b.result, await dismissed(env));
+}
+
+// ---------- dismissed items (Ask Claude: "remove Paul's one from my inbox") ----------
+// Only the Claude Dash list changes: Gmail itself is never touched (read-only).
+// Each dismissed thread is saved with the time of its newest message; when someone
+// writes again in that thread, it's newer than that and the thread comes back.
+
+const DISMISSED_KEY = "inbox:dismissed";
+const DISMISS_KEEP_MS = 9 * 24 * 3_600_000; // longer than the 7-day window the inbox looks at
+
+type Dismissed = Record<string, { lastAt: number; line: string; at: number }>;
+
+async function dismissed(env: Env): Promise<Dismissed> {
+  return JSON.parse((await env.TOKENS.get(DISMISSED_KEY)) ?? "{}") as Dismissed;
+}
+
+function withoutDismissed(ib: Inbox, d: Dismissed): Inbox {
+  const keep = (i: InboxItem) => !(i.id && d[i.id] && (i.lastAt ?? 0) <= d[i.id].lastAt);
+  return { ...ib, reply: ib.reply.filter(keep), followup: ib.followup.filter(keep) };
+}
+
+const STOP = new Set(["the", "and", "for", "from", "with", "about", "that", "this", "one", "ones", "email", "emails", "mail", "inbox", "list",
+  "remove", "delete", "dismiss", "hide", "clear", "take", "off", "out", "please", "can", "you", "his", "her", "their", "thing", "item", "reply", "follow"]);
+const words = (t: string) => t.toLowerCase().replace(/[^a-z0-9/ ]/g, " ").split(/\s+/).filter((w) => w.length >= 2 && !STOP.has(w));
+
+/**
+ * Take one item off the Inbox list. `what` is how the user described it ("Paul's caption one").
+ * Returns what was removed, or the close matches when it isn't clear which one was meant.
+ */
+export async function dismissInboxItem(env: Env, what: string, ctx?: Ctx): Promise<{ removed: string | null; options: string[]; message: string }> {
+  const ib = await inbox(env, false, ctx);
+  const items = [...ib.reply.map((i) => ({ ...i, kind: "reply" })), ...ib.followup.map((i) => ({ ...i, kind: "followup" }))];
+  const asked = words(what);
+  const scored = items.map((i) => {
+    const [person, rest = ""] = i.line.split(/:(.*)/s);
+    const pw = words(person);
+    const rw = words(rest);
+    let score = 0;
+    for (const w of asked) {
+      if (pw.some((p) => p === w || (w.length >= 3 && p.startsWith(w)))) score += 3;
+      else if (rw.some((r) => r === w || (w.length >= 4 && (r.startsWith(w) || w.startsWith(r) && r.length >= 4)))) score += 1;
+    }
+    return { i, score };
+  }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
+  if (!scored.length) return { removed: null, options: items.map((i) => i.line), message: "No item on the Inbox list matches that. These are on it now." };
+  const best = scored[0];
+  const tied = scored.filter((x) => x.score === best.score);
+  if (tied.length > 1) return { removed: null, options: tied.map((x) => x.i.line), message: "More than one item matches. Ask which one the user means." };
+  if (!best.i.id) return { removed: null, options: [], message: "This item can't be removed yet (the list is from before this feature). Try again in 15 minutes." };
+  const d = await dismissed(env);
+  const now = Date.now();
+  for (const [k, v] of Object.entries(d)) if (now - v.at > DISMISS_KEEP_MS) delete d[k];
+  d[best.i.id] = { lastAt: best.i.lastAt ?? now, line: best.i.line, at: now };
+  await env.TOKENS.put(DISMISSED_KEY, JSON.stringify(d));
+  return { removed: best.i.line, options: [], message: `Removed "${best.i.line}" from the Inbox list. It comes back by itself if a new message arrives in that thread.` };
 }
 
 // ---------- new-email alerts ----------

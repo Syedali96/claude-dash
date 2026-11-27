@@ -190,7 +190,7 @@ export function bedtime(w: WhoopToday, timeZone: string): { bedtime: string; wak
  * the one thing to do today to raise tomorrow's recovery. Cached per day + score.
  */
 export async function whoopTip(env: Env, w: WhoopToday): Promise<string> {
-  const key = `whoop:tip3:${new Date().toISOString().slice(0, 10)}:${w.recovery}:${w.sleepHours}`;
+  const key = `whoop:tip4:${new Date().toISOString().slice(0, 10)}:${w.recovery}:${w.sleepHours}`;
   const cached = await env.TOKENS.get(key);
   if (cached) return cached;
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
@@ -199,7 +199,7 @@ export async function whoopTip(env: Env, w: WhoopToday): Promise<string> {
     max_tokens: 600,
     output_config: { effort: "low" },
     system:
-      "You are a WHOOP-style coach. From these numbers, write ONE short plain sentence (at most 45 characters) " +
+      "You are a WHOOP-style coach. From these numbers, write ONE short plain sentence (at most 26 characters, e.g. \"Walk 20 min, no late food\") " +
       "with the single most useful thing to do today to raise tomorrow's recovery. Their recommended bedtime " +
       "is already shown separately, so don't talk about what time to go to bed. No emoji, no quotes.",
     messages: [{ role: "user", content: whoopText(w) }],

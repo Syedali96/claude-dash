@@ -9,8 +9,10 @@ import {
   waitForEvenAppBridge,
 } from "@evenrealities/even_hub_sdk";
 import { ApiError, api, apiStream } from "./api";
-import { ASK, alertFrame, alertPages, askPages, LISTEN_DOT_MS, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, briefPages, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, type WhoopToday } from "./cards";
-import { drawBlank, drawFrame, type Frame, MENU, shapeChanged, updateRegion, updateTile } from "./layout";
+import { ASK, alertFrame, alertPages, askPages, LISTEN_SECONDS, listenLines, listenPages, type AgendaEvent, CARDS, type EmailAlert, type Markets, type DashState, fmtSet, footer, header, type InboxData, inboxPages, readerPages, reminderPages, restFor, sessionSets, summaryPages, TODAY_PAGES, storyLines, visibleCards, type WhoopToday } from "./cards";
+import { drawBlank, drawFrame, type Frame, imagesOf, MENU, shapeChanged, tileText, updateRegion, updateTile } from "./layout";
+import type { CardId } from "./settings";
+import * as widgets from "./widgets";
 import { canonicalName, exerciseKey, nextTip } from "./exercises";
 import { mountPhoneUI } from "./phone";
 import * as posture from "./posture";
@@ -27,7 +29,7 @@ const st: DashState = {
   settings: await loadSettings(null),
   now: new Date(),
   weather: null,
-  brief: { text: "", at: null, loading: false, error: null },
+  reminders: { items: null, today: false, page: 0 },
   news: null,
   markets: null,
   alerts: [],
@@ -39,35 +41,53 @@ const st: DashState = {
   inbox: { data: null, loading: false, error: null, page: 0 },
   whoop: null,
   saved: {},
-  briefPage: 0,
   askOpen: false,
   ask: { phase: "ready", followUp: false, question: "", lines: [], page: 0, history: [], error: null },
   listen: { phase: "off", topic: "", lines: [], page: 0, error: null },
   gym: {
     sets: await loadGym(null), recording: false, busy: false, message: null, restEndsAt: null, restLabel: "", notice: null,
-    recovery: null, sessionStart: 0, summary: null,
+    recovery: null, sessionStart: 0, summary: null, lastLogged: null, restTotal: 0,
   },
 };
 
+/** The card on screen (Reminders hides itself on days with none, so this isn't settings.cards[current]). */
+function cardId(): CardId {
+  const list = visibleCards(st);
+  return list[Math.min(current, list.length - 1)];
+}
+
+/** Keep showing the same card when the list of visible cards changes. */
+function keepCard(update: () => void) {
+  const before = cardId();
+  update();
+  const list = visibleCards(st);
+  const i = list.indexOf(before);
+  current = i >= 0 ? i : Math.min(current, list.length - 1);
+}
+
 function frame(): Frame {
-  const id = st.settings.cards[current];
+  const id = cardId();
   // Ask Claude covers the current card (an email pop-up still goes on top).
   if (st.askOpen && !st.alertView) {
     return { ...header(st, current, battery), body: ASK.body(st), ...footer(st, current), cat: false };
   }
-  // Listening: nothing on screen but three dim dots.
+  // Listening: a still mic in the middle, nothing else but the hint.
   if (id === "listen" && st.listen.phase === "listening" && !st.alertView) {
-    return { title: " ", status: " ", body: CARDS.listen.body(st), dots: " ", hint: " " };
+    return { title: " ", status: " ", body: CARDS.listen.body(st), dots: " ", hint: st.settings.showHints ? "tap  explain last 2 min" : " " };
   }
-  const body = alertFrame(st)?.body ?? CARDS[id].body(st); // a new-email pop-up covers the card
-  return { ...header(st, current, battery), body, ...footer(st, current), cat: !!posture.catPose() };
+  const alert = alertFrame(st);
+  if (alert?.body) return { ...header(st, current, battery), body: alert.body, ...footer(st, current), cat: false }; // opened email
+  const card = st.askOpen ? ASK.body(st) : CARDS[id].body(st);
+  // A new, unopened email: a drawn box over the card you're on.
+  const body = alert?.image ? { tiles: card.tiles, images: [...(card.images ?? []).slice(0, widgets.MAX_IMAGES - 1), alert.image] } : card;
+  return { ...header(st, current, battery), body, ...footer(st, current), cat: !alert && !!posture.catPose() };
 }
 
 /** How many text boxes differ between two frames with the same layout. */
 function changes(a: Frame, b: Frame): number {
   let n = 0;
   for (const k of ["title", "status", "dots", "hint"] as const) if (a[k] !== b[k]) n++;
-  b.body.tiles.forEach((t, i) => { if (t.text !== a.body.tiles[i]?.text) n++; });
+  b.body.tiles.forEach((_, i) => { if (tileText(b, i) !== tileText(a, i)) n++; });
   return n;
 }
 
@@ -82,16 +102,18 @@ async function render(force = false) {
   if (force || !lastFrame || shapeChanged(lastFrame, f) || changes(lastFrame, f) > 3) {
     await drawFrame(bridge, f, st.settings);
     posture.resetSent(); // a rebuilt page starts with an empty cat box
+    widgets.resetSent(); // ...and empty picture boxes
   } else {
     if (f.title !== lastFrame.title) await updateRegion(bridge, "title", f.title);
     if (f.status !== lastFrame.status) await updateRegion(bridge, "status", f.status);
     if (f.dots !== lastFrame.dots) await updateRegion(bridge, "dots", f.dots);
     if (f.hint !== lastFrame.hint) await updateRegion(bridge, "hint", f.hint);
     // Same tiles in the same places: just swap the text that changed.
-    const old = lastFrame.body.tiles;
-    for (const [i, t] of f.body.tiles.entries()) if (t.text !== old[i]?.text) await updateTile(bridge, i, t.text);
+    const prev = lastFrame;
+    for (const i of f.body.tiles.keys()) if (tileText(f, i) !== tileText(prev, i)) await updateTile(bridge, i, tileText(f, i));
   }
   lastFrame = f;
+  widgets.sync(bridge, imagesOf(f)); // sends only pictures that changed, in the background
   if (f.cat) await posture.syncImage(bridge);
 }
 
@@ -99,7 +121,7 @@ async function render(force = false) {
 
 /** The cat stays away while Ask, Listen, the gym or an email pop-up needs the screen. */
 function catAllowed(): boolean {
-  const card = st.settings.cards[current];
+  const card = cardId();
   if (st.askOpen || card === "listen" || card === "gym") return false;
   if (st.alertView || st.ask.streaming) return false;
   return st.ask.phase !== "listening" && st.ask.phase !== "thinking" && st.listen.phase === "off" && !st.gym.recording;
@@ -124,7 +146,7 @@ interface Snapshot {
   markets?: Markets;
   inbox?: { at: number; data: InboxData };
   whoop?: WhoopToday;
-  brief?: { at: number; text: string };
+  reminders?: { items: string[]; today: boolean };
   weather?: string;
 }
 let snap: Snapshot = {};
@@ -145,7 +167,7 @@ function restore(s: Snapshot | null) {
   if (s.markets) st.markets = s.markets;
   if (s.inbox) { st.inbox.data = s.inbox.data; st.saved.inbox = s.inbox.at; }
   if (s.whoop) { st.whoop = s.whoop; st.gym.recovery = s.whoop.recovery; }
-  if (s.brief) st.brief = { text: s.brief.text, at: new Date(s.brief.at), loading: false, error: null };
+  if (s.reminders) st.reminders = { ...st.reminders, ...s.reminders };
   if (s.weather) st.weather = s.weather;
 }
 
@@ -371,37 +393,22 @@ async function openStory() {
   await render();
 }
 
-let briefBusy = false;
+// ---------- reminders (sent to the server by an iPhone Shortcut) ----------
 
-async function refreshBrief() {
-  if (briefBusy) return;
-  briefBusy = true;
-  // With a plan already on screen, make the new one quietly in the background.
-  st.brief = { ...st.brief, loading: !st.brief.text, error: null };
-  await render();
-  try {
-    const data = await api<{ text?: string }>(st.settings, "/api/brief", {
-      method: "POST",
-      body: JSON.stringify({
-        prompt: st.settings.briefPrompt,
-        now: new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }),
-        weather: st.weather ?? undefined,
-        tasks: st.settings.tasks,
-        gym: st.gym.sets.filter((x) => x.t >= todayRange().start.getTime()).map((x) => `${x.exercise} ${fmtSet(x)}`),
-        dayStart: todayRange().start.toISOString(),
-        dayEnd: todayRange().end.toISOString(),
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      }),
-    });
-    if (!data.text) throw new Error("Claude returned an empty brief.");
-    st.brief = { text: data.text, at: new Date(), loading: false, error: null };
-    st.briefPage = 0;
-    remember({ brief: { at: Date.now(), text: data.text } });
-  } catch (e) {
-    st.brief = { ...st.brief, loading: false, error: e instanceof Error ? e.message : "Could not reach Claude." };
+async function refreshReminders() {
+  if (new URLSearchParams(location.search).has("demo")) {
+    keepCard(() => { st.reminders = { ...st.reminders, items: ["Call the bank about the wire", "Pick up dry cleaning", "Send Brandon the deck", "Book flights for the label pilot"], today: true }; });
+    return render();
   }
-  briefBusy = false;
-  await render();
+  try {
+    const tz = encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone || "America/New_York");
+    const data = await api<{ items: string[]; today?: boolean }>(st.settings, `/api/reminders?tz=${tz}`);
+    keepCard(() => { st.reminders = { ...st.reminders, items: data.items, today: !!data.today }; });
+    remember({ reminders: { items: data.items, today: !!data.today } });
+    await render();
+  } catch {
+    /* keep the last list */
+  }
 }
 
 // ---------- gym: voice logging ----------
@@ -498,6 +505,7 @@ async function removeSet(set: LoggedSet, today: LoggedSet[], wasLast: boolean) {
 
 async function runGymCommand(cmd: GymCommand, heard: string, today: LoggedSet[]) {
   st.gym.notice = null;
+  if (cmd.action !== "log") st.gym.lastLogged = null; // the rest screen shows the notice instead
   switch (cmd.action) {
     case "log":
       return logSet(cmd.set);
@@ -579,15 +587,18 @@ async function logSet(heard: Omit<LoggedSet, "t">) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const key = exerciseKey(set.exercise);
   const before = st.gym.sets.filter((x) => exerciseKey(x.exercise) === key && x.t < today.getTime());
-  st.gym.sets = [...st.gym.sets, { ...set, t: Date.now() }];
+  const logged = { ...set, t: Date.now() };
+  st.gym.sets = [...st.gym.sets, logged];
   await saveGym(bridge, st.gym.sets);
   const rest = restFor(st, set.exercise);
   st.gym.restEndsAt = Date.now() + rest.seconds * 1000;
+  st.gym.restTotal = rest.seconds;
   st.gym.restLabel = rest.label;
   const lastDay = before.length ? new Date(before[before.length - 1].t).toDateString() : null;
   const last = lastDay ? before.filter((x) => new Date(x.t).toDateString() === lastDay) : [];
-  // Instead of last time's numbers, say what to aim for next.
-  st.gym.message = `Logged ${fmtSet(set)}  ·  ${nextTip(set, last)}`;
+  const tip = nextTip(set, last);
+  st.gym.lastLogged = { set: logged, last, tip };
+  st.gym.message = `Logged ${fmtSet(set)}  ·  ${tip}`;
   phone.showGym(st.gym.sets);
 }
 
@@ -616,8 +627,10 @@ async function gymDevTest() {
     await runGymCommand(res.command, res.text, today);
     await new Promise((r) => setTimeout(r, 50)); // distinct timestamps
   }
-  const i = st.settings.cards.indexOf("gym");
-  if (q.has("gymtest") && i >= 0) current = i;
+  // ?gymrest: log a sample set without a server, to see the rest screen.
+  if (q.has("gymrest")) await logSet({ exercise: "Bench Press", weight: 185, unit: "lb", reps: 8 });
+  const i = visibleCards(st).indexOf("gym");
+  if ((q.has("gymtest") || q.has("gymrest")) && i >= 0) current = i;
   // ?asktest=q1|q2 asks typed questions in one chat (each keeps the earlier ones as context).
   for (const text of (q.get("asktest") ?? "").split("|").filter(Boolean)) {
     st.askOpen = true;
@@ -722,6 +735,7 @@ async function askStream(q: { audio?: Uint8Array; text?: string }) {
     let error: string | null = null;
     const err = rest.match(/\nERROR: (.*)$/);
     if (err) { error = err[1]; rest = rest.slice(0, err.index); }
+    rest = rest.replace(/\x1f/g, ""); // "\x1f" = the inbox list changed (an item was removed)
     return { headerDone: nl >= 0, question, answer: rest.slice(rest.lastIndexOf("\x1e") + 1).trim(), error };
   };
   let shown = "";
@@ -738,6 +752,7 @@ async function askStream(q: { audio?: Uint8Array; text?: string }) {
   };
   try {
     const text = await apiStream(st.settings, "/api/ask", { method: "POST", body: form }, show);
+    if (text.includes("\x1f")) refreshInbox(); // you asked Claude to take something off your Inbox list
     const r = parse(text);
     st.ask.streaming = false;
     if (st.ask.phase === "listening") return; // you started a new question meanwhile
@@ -968,7 +983,7 @@ async function listenDevTest() {
   if (!import.meta.env.DEV) return;
   const text = new URLSearchParams(location.search).get("listentest");
   if (!text) return;
-  current = Math.max(0, st.settings.cards.indexOf("listen"));
+  current = Math.max(0, visibleCards(st).indexOf("listen"));
   st.listen = { phase: "listening", topic: "", lines: [], page: 0, error: null };
   if (text !== "dots") await explain(text);
 }
@@ -1052,10 +1067,11 @@ function toGesture(ev: EvenHubEvent): Gesture | null {
 }
 
 async function onTap() {
-  const id = st.settings.cards[current];
-  if (id === "brief") {
-    if (!st.brief.text) return refreshBrief();
-    st.briefPage = (st.briefPage + 1) % briefPages(st).length;
+  const id = cardId();
+  if (id === "reminders") {
+    // Next page; after the last one, back to the first with the latest list.
+    st.reminders.page = (st.reminders.page + 1) % reminderPages(st).length;
+    if (st.reminders.page === 0) refreshReminders();
     return render();
   }
   if (id === "agenda") {
@@ -1147,8 +1163,8 @@ async function handle(g: Gesture) {
     return askGesture(g === "double");
   }
   if (await alertGesture(g)) return;
-  const n = st.settings.cards.length;
-  const card = st.settings.cards[current];
+  const n = visibleCards(st).length;
+  const card = cardId();
   // Leaving the Listen card turns the mic off and forgets the audio.
   if ((g === "next" || g === "prev") && card === "listen") await stopListen();
   // Listen: double tap goes back to the dots, or stops listening from the dots.
@@ -1156,8 +1172,6 @@ async function handle(g: Gesture) {
     if (st.listen.phase === "listening" || st.listen.phase === "error") { await stopListen(); return render(); }
     return backToDots();
   }
-  // Day plan: double tap makes a new plan.
-  if (g === "double" && card === "brief") return refreshBrief();
   // News: double tap opens the highlighted story (or closes it).
   if (g === "double" && card === "news") {
     if (st.reader) { st.reader = null; return render(); }
@@ -1180,10 +1194,10 @@ const phone = mountPhoneUI(st.settings, {
   async onChange(s) {
     const serverChanged = s.serverUrl !== st.settings.serverUrl || s.accessToken !== st.settings.accessToken;
     st.settings = s;
-    current = Math.min(current, s.cards.length - 1);
+    current = Math.min(current, visibleCards(st).length - 1);
     await saveSettings(bridge, s);
     await render(true); // brightness or layout settings may have changed
-    if (serverChanged) { refreshAgenda(); refreshInbox(); refreshWhoop(); refreshBrief(); }
+    if (serverChanged) { refreshAgenda(); refreshInbox(); refreshWhoop(); refreshReminders(); }
   },
   onGesture: (g) => handle(g),
   async onGymUndo() {
@@ -1222,9 +1236,7 @@ async function boot() {
       if (ev.menuItemClickEvent) {
         const id = ev.menuItemClickEvent.itemID;
         if (id === MENU.refresh) {
-          const i = st.settings.cards.indexOf("brief");
-          if (i >= 0) { current = i; await render(); }
-          await refreshBrief();
+          refreshAgenda(); refreshInbox(); refreshWhoop(); refreshNews(); refreshMarkets(); refreshReminders();
         }
         if (id === MENU.home) await handle("double");
         if (id === MENU.close) await bridge!.shutDownPageContainer(0);
@@ -1249,6 +1261,18 @@ async function boot() {
   await listenDevTest();
   savedDevTest();
   if (import.meta.env.DEV) posture.devTest(new URLSearchParams(location.search).get("posturetest"));
+  // Dev only: ?card=news opens that card; ?alertdemo shows a sample new-email box over it.
+  if (import.meta.env.DEV) {
+    const q = new URLSearchParams(location.search);
+    const want = q.get("card") as CardId | null;
+    if (want && visibleCards(st).includes(want)) current = visibleCards(st).indexOf(want);
+    if (q.has("alertdemo")) {
+      const a: EmailAlert = { id: "demo", tag: "ech", from: "Paul", subject: "11/26 post", line: "approve the caption by 3 PM", at: Date.now(),
+        summary: "Paul needs your OK on the caption for the 11/26 post before it goes out at 3 PM. He attached two options and prefers the shorter one." };
+      st.alerts = [a];
+      st.alertView = { list: [a], index: 0, expanded: false, page: 0, closeAt: null };
+    }
+  }
   if (!st.settings.cards.length) st.settings.cards = ["agenda"];
   await render();
   refreshWeather();
@@ -1260,17 +1284,7 @@ async function boot() {
     pollAlerts();
   }
   if (st.settings.cards.includes("inbox")) refreshInbox();
-  // The day plan is remade every 2 hours anyway, so a recent one from last launch is kept.
-  const BRIEF_EVERY_MS = 2 * 60 * 60_000;
-  if (st.settings.cards.includes("brief") && (!st.brief.at || Date.now() - st.brief.at.getTime() > BRIEF_EVERY_MS)) refreshBrief();
-
-  // Listen: step the three dots while only the dots are on screen (one small text update each time).
-  setInterval(() => {
-    const showing = st.settings.cards[current] === "listen" && st.listen.phase === "listening" && !st.alertView && !asleep;
-    if (!showing) return;
-    st.listen.dot = ((st.listen.dot ?? 0) + 1) % 3;
-    render();
-  }, LISTEN_DOT_MS);
+  if (st.settings.cards.includes("reminders")) refreshReminders();
 
   // Tick: clock every minute, gym rest timer every second while it runs.
   let lastMinute = -1;
@@ -1280,7 +1294,7 @@ async function boot() {
     if (posture.tick(bridge, st.settings.postureCat, catAllowed())) catChanged();
     if (st.alertView?.closeAt && Date.now() > st.alertView.closeAt) closeAlerts();
     const minute = st.now.getMinutes();
-    const card = st.settings.cards[current];
+    const card = cardId();
     const restVisible = card === "gym" && st.gym.restEndsAt && st.now.getTime() - st.gym.restEndsAt < 2000;
     if (minute !== lastMinute || restVisible) {
       lastMinute = minute;
@@ -1292,7 +1306,7 @@ async function boot() {
   setInterval(refreshInbox, 15 * 60_000);
   setInterval(refreshWhoop, 20 * 60_000);
   setInterval(refreshNews, 15 * 60_000); // the server only re-picks when the feeds have new stories
-  setInterval(refreshBrief, BRIEF_EVERY_MS); // keep the day plan current
+  setInterval(refreshReminders, 15 * 60_000); // the Shortcut sends a new list at 6 AM and when the Even app opens
   setInterval(refreshMarkets, 5 * 60_000);
   setInterval(pollAlerts, ALERT_EVERY_MS);
 }

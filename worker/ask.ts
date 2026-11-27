@@ -3,7 +3,7 @@
 // your 4 inboxes, calendar, WHOOP, iPhone Reminders, inbox triage and news.
 import Anthropic from "@anthropic-ai/sdk";
 import { betaTool } from "@anthropic-ai/sdk/helpers/beta/json-schema";
-import { inbox } from "./gmail";
+import { dismissInboxItem, inbox } from "./gmail";
 import { ACCOUNTS, type AccountKey, accessToken, agenda } from "./google";
 import { transcribe } from "./gym";
 import type { Ctx } from "./cache";
@@ -92,8 +92,12 @@ unless listing, no emoji. Answer in at most 70 words, most important fact first.
 Use the tools to look things up in the user's own email, calendar, WHOOP, reminders and news
 before answering; never guess what an email says. For general questions (facts, prices, sports, news
 beyond the headlines), use web_search. Don't add source links; the display can't open them. Gmail search syntax works in search_email
-(from:paul, subject:TAP, newer_than:7d). You can only read: if asked to send, reply, delete
-or change anything, say you can't do that from the glasses yet.`;
+(from:paul, subject:TAP, newer_than:7d).
+The one thing you can change is the Claude Dash Inbox list: when Ali asks to remove, clear or dismiss an item from
+his inbox list, call dismiss_inbox_item with how he described it (it doesn't touch Gmail; the item comes back if a
+new message arrives in that thread). Then confirm in one short sentence exactly what you removed, e.g.
+"Removed Paul: approve the 11/26 post caption from your Inbox list." If more than one item matches, ask which one.
+Everything else is read-only: if asked to send, reply, delete or change emails or events, say you can't do that from the glasses yet.`;
 
 /**
  * Two ways in:
@@ -130,6 +134,7 @@ export async function ask(req: Request, env: Env, ctx?: Ctx): Promise<Response> 
 
   const tz = body.timeZone || "America/New_York";
   let searches = 0;
+  let inboxChanged = false; // an item was taken off the Inbox list: tell the glasses to reload it
   const tools = [
     betaTool({
       name: "search_email",
@@ -178,6 +183,17 @@ export async function ask(req: Request, env: Env, ctx?: Ctx): Promise<Response> 
       run: async () => {
         const ib = await inbox(env, false, ctx);
         return JSON.stringify({ reply: ib.reply.map((i) => i.line), followup: ib.followup.map((i) => i.line) });
+      },
+    }),
+    betaTool({
+      name: "dismiss_inbox_item",
+      description: "Remove one item from the user's Claude Dash Inbox list (reply or follow-up), e.g. when they say \"remove Paul's caption one from my inbox\". " +
+        "Pass how the user described it (person and/or subject). Gmail is not changed. Returns what was removed, or the matching items if it's unclear.",
+      inputSchema: { type: "object", properties: { description: { type: "string" } }, required: ["description"], additionalProperties: false },
+      run: async ({ description }) => {
+        const r = await dismissInboxItem(env, String(description), ctx);
+        if (r.removed) inboxChanged = true;
+        return JSON.stringify(r);
       },
     }),
     betaTool({
@@ -242,6 +258,7 @@ export async function ask(req: Request, env: Env, ctx?: Ctx): Promise<Response> 
       }
       if (refused) await write("\x1eI can't help with that one.");
       else if (!wrote) await write("\x1eI couldn't find an answer to that.");
+      if (inboxChanged) await write("\x1f"); // the glasses reload the Inbox card
     } catch (e) {
       await write(`\nERROR: ${e instanceof Error ? e.message : "Claude error"}`).catch(() => {});
     } finally {

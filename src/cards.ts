@@ -2,6 +2,7 @@
 // Add a card: give it an id in settings.ts, then a renderer here.
 import { exerciseKey, type LiftType, liftType } from "./exercises";
 import type { CardId, LoggedSet, Settings } from "./settings";
+import { emailWidget, type Img, micWidget, recoveryWidget, restWidget, sparkWidget, tickStep } from "./widgets";
 
 export interface AgendaEvent {
   title: string;
@@ -16,7 +17,7 @@ export interface AgendaEvent {
 export interface InboxItem {
   line: string; // "Paul: content review, 11/26"
   tag: string; // which inbox: ech, hel, asy, gml
-  ageHours: number;
+  ageHours: number; // how long they've waited (reply) or you've waited (follow up)
 }
 
 export interface InboxData {
@@ -51,7 +52,12 @@ export interface EmailAlert {
   at: number;
 }
 
-export interface Markets { sp500: number | null; btc: number | null; btcChange: number | null }
+export interface Markets {
+  sp500: number | null;
+  btc: number | null;
+  btcChange: number | null;
+  spark?: { sp500: number[]; btc: number[] }; // S&P since today's open, BTC over 24 hours
+}
 
 /** One box of text on the glasses. x/y are relative to the body area (576 x 202). */
 export interface Tile {
@@ -65,8 +71,8 @@ export interface Tile {
   capture?: boolean; // receives gestures (default: the biggest tile)
 }
 
-/** A card body is a few tiles. */
-export interface Body { tiles: Tile[] }
+/** A card body is a few tiles, plus maybe a few small drawn pictures. */
+export interface Body { tiles: Tile[]; images?: Img[] }
 
 export interface Reader {
   title: string;
@@ -80,8 +86,7 @@ export interface DashState {
   settings: Settings;
   now: Date;
   weather: string | null; // "56°F · clear" (used by the day plan)
-  brief: { text: string; at: Date | null; loading: boolean; error: string | null };
-  briefPage: number;
+  reminders: { items: string[] | null; today: boolean; page: number }; // iPhone reminders due today
   agenda: { events: AgendaEvent[] | null; loading: boolean; error: string | null; notConnected: boolean };
   agendaPage: number; // 0 schedule, 1 WHOOP + inbox
   news: string[] | null; // up to 10 headlines
@@ -125,6 +130,8 @@ export interface DashState {
     recovery: number | null; // WHOOP recovery %, once WHOOP is connected
     sessionStart: number; // sets before this belong to an earlier (finished) workout
     summary: { end: number; page: number } | null; // the workout-complete screen
+    lastLogged: { set: LoggedSet; last: LoggedSet[]; tip: string } | null; // the set you just logged, and last session's sets for it
+    restTotal: number; // seconds of the current rest
   };
 }
 
@@ -278,13 +285,18 @@ function zone(r: number): string {
   return r >= 67 ? "GREEN" : r >= 34 ? "YELLOW" : "RED";
 }
 
+// The recovery ring is a drawn picture in rows 2-4 of the tile; the text leaves those rows empty.
+const REC_IMG = { x: 16, y: 76 };
+
 function lifeBody(st: DashState): Body {
   const w = st.whoop;
   let rec: string[];
+  const images: Img[] = [];
   if (w?.recovery != null) {
-    rec = ["RECOVERY", `${w.recovery}%  ${zone(w.recovery)}`];
+    rec = ["RECOVERY", "", "", ""];
+    images.push(recoveryWidget(REC_IMG.x, REC_IMG.y, w.recovery, zone(w.recovery)));
     if (w.bedtime) rec.push(`Bed by ${w.bedtime}`);
-    if (w.tip) rec.push(...wrap(w.tip, colsFor(244)));
+    if (w.tip) rec.push(trim(w.tip, colsFor(244)));
   } else rec = ["RECOVERY", w ? "Not scored yet" : "WHOOP not connected"];
 
   const ib = st.inbox.data;
@@ -302,17 +314,25 @@ function lifeBody(st: DashState): Body {
     if (!inbox.length) inbox = ["INBOX", "", "Nothing needs you."];
   } else inbox = ["INBOX", "", st.inbox.error ?? "Reading your inboxes..."];
 
-  return { tiles: [box(8, 2, 244, 196, rec), box(260, 2, 308, 196, inbox)] };
+  return { tiles: [box(8, 2, 244, 196, rec), box(260, 2, 308, 196, inbox)], images };
 }
 
 export const TODAY_PAGES = 2;
 
 // ---------- news: two market tiles, then the stories ----------
 
-function marketTiles(m: Markets | null): Tile[] {
+const pct1 = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
+const kUsd = (n: number) => (n >= 10_000 ? `$${(n / 1000).toFixed(1)}k` : `$${Math.round(n).toLocaleString("en-US")}`);
+// A small price line at the right end of each market tile (screen coordinates).
+const SPARK = { sp500: { x: 186, y: 52 }, btc: { x: 470, y: 52 } };
+
+function marketTiles(m: Markets | null): { tiles: Tile[]; images: Img[] } {
   const sp = m?.sp500 == null ? "S&P 500   --" : `S&P 500   ${pct(m.sp500)}`;
-  const btc = m?.btc == null ? "BTC   --" : `BTC  $${Math.round(m.btc).toLocaleString("en-US")}  ${m.btcChange == null ? "" : pct(m.btcChange)}`;
-  return [box(8, 2, 276, 42, [m ? sp : "Markets loading..."]), box(292, 2, 276, 42, [m ? btc : ""])];
+  const btc = m?.btc == null ? "BTC   --" : `BTC  ${kUsd(m.btc)}  ${m.btcChange == null ? "" : pct1(m.btcChange)}`;
+  const images: Img[] = [];
+  if (m?.spark?.sp500 && m.spark.sp500.length >= 2) images.push(sparkWidget(SPARK.sp500.x, SPARK.sp500.y, m.spark.sp500));
+  if (m?.spark?.btc && m.spark.btc.length >= 2) images.push(sparkWidget(SPARK.btc.x, SPARK.btc.y, m.spark.btc));
+  return { tiles: [box(8, 2, 276, 42, [m ? sp : "Markets loading..."]), box(292, 2, 276, 42, [m ? btc : ""])], images };
 }
 
 const LIST = { x: 0, y: 52, w: 576, h: 148 }; // free list under one-row tiles: 5 rows
@@ -338,7 +358,7 @@ function newsBody(st: DashState): Body {
     const p = readerLines(st);
     return { tiles: [full(p[Math.min(r.page, p.length - 1)])] };
   }
-  const tiles = marketTiles(st.markets);
+  const { tiles, images } = marketTiles(st.markets);
   const n = st.news;
   const rows = rowsFor(LIST.h, false);
   let lines: string[];
@@ -350,7 +370,7 @@ function newsBody(st: DashState): Body {
     lines = n.slice(start, start + rows).map((h, i) => `${start + i === c ? ">" : "  "}  ${h}`);
   }
   tiles.push(box(LIST.x, LIST.y, LIST.w, LIST.h, lines, { border: false, capture: true }));
-  return { tiles };
+  return { tiles, images };
 }
 
 // ---------- email alert pop-up ----------
@@ -364,17 +384,20 @@ export function alertPages(st: DashState): number {
   return v?.expanded ? pages(alertLines(v.list[v.index])).length : 1;
 }
 
-export function alertFrame(st: DashState): { title: string; body: Body; hint: string } | null {
+/** Where the new-email box sits: centred over the card. */
+export const ALERT_BOX = { x: 144, y: 70 };
+
+/**
+ * A new email. Not opened yet: a drawn box over the card you're on (no `body`, the card stays
+ * behind it). Opened (tap): the full-screen reader.
+ */
+export function alertFrame(st: DashState): { title?: string; body?: Body; image?: Img; hint: string } | null {
   const v = st.alertView;
   if (!v) return null;
   const a = v.list[v.index];
   const count = v.list.length > 1 ? `  ${v.index + 1}/${v.list.length}` : "";
   if (!v.expanded) {
-    return {
-      title: `● NEW EMAIL${count}`,
-      body: { tiles: [full([`${a.from}  ·  ${a.tag}`, "", ...wrap(a.line, COLS), "", "Tap to read more."])] },
-      hint: "tap  read   2x  close",
-    };
+    return { image: emailWidget(ALERT_BOX.x, ALERT_BOX.y, a, count), hint: "tap  read   2x  close" };
   }
   const p = pages(alertLines(a));
   const page = Math.min(v.page, p.length - 1);
@@ -389,46 +412,87 @@ export function alertFrame(st: DashState): { title: string; body: Body; hint: st
 
 // ---------- inbox: two count tiles, then the list ----------
 
-function inboxLines(d: InboxData): string[] {
-  const out: string[] = [];
-  if (d.reply.length) out.push("REPLY", ...d.reply.map((i) => `  ${i.line}`));
-  if (d.followup.length) out.push("FOLLOW UP", ...d.followup.map((i) => `  ${i.line}`));
+/** "2h", "5h", "1d", "3d": how long someone has waited. */
+export function waited(hours: number): string {
+  const h = Math.max(0, Math.round(hours));
+  return h < 1 ? "now" : h < 24 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
+
+// The list, with how long each person has waited in a dim column on the right.
+const INBOX_LIST = { x: 0, y: 52, w: 492, h: 148 };
+const INBOX_AGE = { x: 500, y: 52, w: 76, h: 148 };
+
+function inboxRowsOf(d: InboxData): { line: string; age: string }[] {
+  const cols = colsFor(INBOX_LIST.w, false);
+  const out: { line: string; age: string }[] = [];
+  const add = (label: string, items: InboxItem[]) => {
+    if (!items.length) return;
+    out.push({ line: label, age: "" });
+    for (const i of items) out.push({ line: trim(`  ${i.line}`, cols), age: waited(i.ageHours) });
+  };
+  add("REPLY", d.reply);
+  add("FOLLOW UP", d.followup);
   return out;
 }
 
 const inboxRows = () => rowsFor(LIST.h, false);
 
+/** Pages of rows; a section label never sits alone at the bottom of a page. */
+function inboxPaged(d: InboxData): { line: string; age: string }[][] {
+  const rows = inboxRowsOf(d);
+  const n = inboxRows();
+  const out: { line: string; age: string }[][] = [[]];
+  for (const r of rows) {
+    let page = out[out.length - 1];
+    const lonely = !r.age && page.length >= n - 1;
+    if (page.length >= n || (lonely && page.length)) { page = []; out.push(page); }
+    page.push(r);
+  }
+  return out;
+}
+
 export function inboxPages(st: DashState): number {
-  return st.inbox.data ? pages(inboxLines(st.inbox.data), inboxRows()).length : 1;
+  return st.inbox.data ? inboxPaged(st.inbox.data).length : 1;
 }
 
 function inboxBody(st: DashState): Body {
   const ib = st.inbox;
   if (!ib.data) return message(ib.error ? `${ib.error}\n\nTap to retry.` : "Reading your 4 inboxes...");
   const d = ib.data;
-  const lines = inboxLines(d);
-  if (!lines.length) return message("Inbox zero. Nothing needs you.");
-  const p = pages(lines, inboxRows());
+  if (!d.reply.length && !d.followup.length) return message("Inbox zero. Nothing needs you.");
+  const p = inboxPaged(d);
+  const page = p[Math.min(ib.page, p.length - 1)];
   return {
     tiles: [
       box(8, 2, 276, 42, [`${d.reply.length}   TO REPLY`]),
       box(292, 2, 276, 42, [`${d.followup.length}   TO FOLLOW UP`]),
-      box(LIST.x, LIST.y, LIST.w, LIST.h, p[Math.min(ib.page, p.length - 1)], { border: false, capture: true }),
+      box(INBOX_LIST.x, INBOX_LIST.y, INBOX_LIST.w, INBOX_LIST.h, page.map((r) => r.line), { border: false, capture: true }),
+      box(INBOX_AGE.x, INBOX_AGE.y, INBOX_AGE.w, INBOX_AGE.h, page.map((r) => r.age), { border: false, dim: true }),
     ],
   };
 }
 
-// ---------- day plan: one big tile per page ----------
+// ---------- reminders: today's iPhone reminders, one big tile per page ----------
 
-export function briefPages(st: DashState): string[][] {
-  const b = st.brief;
-  if (!b.text) return [[]];
-  return pagesOf(b.text.split("\n").map((p) => wrap(p, COLS, p.startsWith("- ") ? "  " : "")));
+/** The Reminders card only shows when the iPhone sent a list today with something on it. */
+export const hasReminders = (st: DashState) => st.reminders.today && !!st.reminders.items?.length;
+
+export function reminderPages(st: DashState): string[][] {
+  const items = st.reminders.items ?? [];
+  if (!items.length) return [[]];
+  return pagesOf(items.map((t) => wrap(`◆ ${t}`, COLS, "   ")));
+}
+
+/** The cards you can swipe to right now (Reminders hides itself on days with none). */
+export function visibleCards(st: DashState): CardId[] {
+  const list = st.settings.cards.filter((c) => c !== "reminders" || hasReminders(st));
+  return list.length ? list : ["agenda"];
 }
 
 // ---------- gym: status tile, then today's sets ----------
 
 const TYPE_LABEL: Record<LiftType, string> = { heavy: "heavy lift", compound: "compound", isolation: "isolation" };
+const TYPE_SHORT: Record<string, string> = { heavy: "heavy", compound: "compound", isolation: "isolation" };
 const m_ss = (secs: number) => `${Math.floor(secs / 60)}:${pad(secs % 60)}`;
 
 /** Rest after a set: by lift type, plus more when WHOOP says you're under-recovered. */
@@ -445,10 +509,55 @@ export function restFor(st: DashState, exercise: string): { seconds: number; lab
 export const fmtSet = (s: { weight: number; unit: string; reps: number }) =>
   s.weight ? `${s.weight}x${s.reps}` : `${s.reps} reps`;
 
+// Resting: a drawn countdown ring on the left, the set you just logged top right, the list under it.
+const REST_IMG = { x: 12, y: 46 };
+
+function restBody(st: DashState, now: number): Body {
+  const g = st.gym;
+  const total = g.restTotal || 90;
+  const left = Math.min(total, Math.max(0, Math.ceil((g.restEndsAt! - now) / 1000)));
+  // On slow Bluetooth the ring moves every few seconds and the exact time shows as text too.
+  const step = tickStep();
+  const ringLeft = Math.min(total, Math.ceil(left / step) * step);
+  const ll = g.lastLogged;
+  let logged: string[];
+  if (ll) {
+    const unit = ll.set.weight ? ` ${ll.set.unit}` : "";
+    const lastBest = ll.last.length ? ll.last.reduce((a, b) => (score(b) > score(a) ? b : a)) : null;
+    const next = ll.tip.replace(/^next:\s*/, "next ");
+    logged = [trim(`${ll.set.exercise}  ${fmtSet(ll.set)}${unit}`, colsFor(400)), trim(lastBest ? `last time ${fmtSet(lastBest)}  ·  ${next}` : next, colsFor(400))];
+  } else logged = [trim(g.message ?? "Resting", colsFor(400)), ""];
+  if (g.notice) logged = [trim(g.notice, colsFor(400)), trim(g.message ?? "", colsFor(400))];
+  return {
+    tiles: [
+      box(160, 2, 408, 68, logged),
+      box(156, 78, 420, 122, setLines(st), { border: false, capture: true }),
+      box(8, 158, 148, 40, [step > 1 ? `${m_ss(left)}  ${TYPE_SHORT[g.restLabel.split(" ")[0]] ?? ""}` : trim(g.restLabel.split(" + ")[0], 15)], { border: false, dim: true }),
+    ],
+    images: [restWidget(REST_IMG.x, REST_IMG.y, ringLeft, total)],
+  };
+}
+
+/** This workout's sets grouped by exercise, most recent exercise first. */
+function setLines(st: DashState): string[] {
+  const today = sessionSets(st);
+  const groups = new Map<string, LoggedSet[]>();
+  for (const s of [...today].reverse()) {
+    const k = exerciseKey(s.exercise);
+    groups.set(k, [...(groups.get(k) ?? []), s]);
+  }
+  const lines = [...groups.values()].map((sets) => {
+    const unit = sets[0].weight ? ` (${sets[0].unit})` : "";
+    return `${sets[0].exercise}${unit}   ${[...sets].reverse().map(fmtSet).join("  ")}`;
+  });
+  return lines.length ? lines : ["No sets yet today."];
+}
+
 function gymBody(st: DashState): Body {
   const g = st.gym;
   if (g.summary) return summaryBody(st);
   const now = st.now.getTime();
+  if (!g.recording && !g.busy && g.restEndsAt && g.restEndsAt > now) return restBody(st, now);
   let status: string;
   let sub = "";
   if (g.recording) { status = "● LISTENING"; sub = "Log a set, or say \"cancel that\""; }
@@ -458,22 +567,10 @@ function gymBody(st: DashState): Body {
   else if (g.restEndsAt && now - g.restEndsAt < 5 * 60_000) { status = "GO  ·  next set"; sub = g.message ?? ""; }
   else { status = "READY"; sub = g.message ?? 'Tap, then say "bench, 185, 8 reps"'; }
 
-  const today = sessionSets(st);
-  // Group this workout's sets by exercise, most recent exercise first.
-  const groups = new Map<string, LoggedSet[]>();
-  for (const s of [...today].reverse()) {
-    const k = exerciseKey(s.exercise);
-    groups.set(k, [...(groups.get(k) ?? []), s]);
-  }
-  const lines = [...groups.values()].map((sets) => {
-    const unit = sets[0].weight ? ` (${sets[0].unit})` : "";
-    return `${sets[0].exercise}${unit}   ${sets.reverse().map(fmtSet).join("  ")}`;
-  });
-
   return {
     tiles: [
       box(8, 2, 560, 68, [status, sub]),
-      box(0, 78, 576, 122, lines.length ? lines : ["No sets yet today."], { border: false, capture: true }),
+      box(0, 78, 576, 122, setLines(st), { border: false, capture: true }),
     ],
   };
 }
@@ -655,17 +752,15 @@ function listenGroups(st: DashState): string[][] {
   return out;
 }
 
-/** Small "thinking" dots: one is lit at a time and it moves left to right, like Claude's working dots. */
-export const LISTEN_DOT_MS = 500;
-export function listenDots(step: number): string {
-  return [0, 1, 2].map((i) => (i === step % 3 ? "•" : "·")).join("  ");
-}
-
 function listenBody(st: DashState): Body {
   const l = st.listen;
   switch (l.phase) {
     case "listening":
-      return { tiles: [box(268, 80, 80, 40, [listenDots(l.dot ?? 0)], { border: false, dim: true, capture: true })] };
+      // A still mic with rings (drawn once, no animation) and "Listening" under it.
+      return {
+        tiles: [box(244, 150, 100, 40, ["Listening"], { border: false, dim: true, capture: true })],
+        images: [micWidget(216, 44)],
+      };
     case "thinking":
       return { tiles: [box(ANSWER.x, 2, ANSWER.w, 196, ["Looking into it..."], { border: false, capture: true })] };
     case "answer": {
@@ -706,7 +801,10 @@ export const CARDS: Record<CardId, CardDef> = {
     body: newsBody,
   },
   inbox: {
-    title: () => "INBOX",
+    title: (st) => {
+    const d = st.inbox.data;
+    return d ? `INBOX  ·  ${4 - d.skipped.length} accounts` : "INBOX";
+  },
     tapHint: (st) => {
       const n = inboxPages(st);
       return `${n > 1 ? `${Math.min(st.inbox.page, n - 1) + 1}/${n}   ` : ""}tap  more`;
@@ -747,19 +845,18 @@ export const CARDS: Record<CardId, CardDef> = {
     },
     body: listenBody,
   },
-  brief: {
-    title: (st) => (st.brief.at ? `DAY PLAN  ·  as of ${clock(st.brief.at, st.settings.use24h)}` : "DAY PLAN"),
+  reminders: {
+    title: (st) => {
+      const n = st.reminders.items?.length ?? 0;
+      return `REMINDERS  ·  ${n} today`;
+    },
     tapHint: (st) => {
-      const n = briefPages(st).length;
-      return `${n > 1 ? `${Math.min(st.briefPage, n - 1) + 1}/${n}   ` : ""}tap  more   2x  new plan`;
+      const n = reminderPages(st).length;
+      return n > 1 ? `${Math.min(st.reminders.page, n - 1) + 1}/${n}   tap  more` : "";
     },
     body: (st) => {
-      const b = st.brief;
-      if (b.loading) return message("Planning your day...");
-      if (b.error) return message(`${b.error}\n\nDouble tap to retry.`);
-      if (!b.text) return message("Double tap to get your day plan from Claude.");
-      const p = briefPages(st);
-      return { tiles: [full(p[Math.min(st.briefPage, p.length - 1)])] };
+      const p = reminderPages(st);
+      return { tiles: [full(p[Math.min(st.reminders.page, p.length - 1)])] };
     },
   },
 };
@@ -788,22 +885,25 @@ const SAVED_LABEL_MS = 5 * 60_000; // younger saved data needs no label
 
 /** Footer: page dots on the left, a short dim hint on the right. */
 export function footer(st: DashState, current: number): { dots: string; hint: string } {
+  const cards = visibleCards(st);
+  const id = cards[current] ?? cards[0];
   // On the Listen card, "● ● ●" in the corner means the mic is still on.
-  const listening = st.settings.cards[current] === "listen" && st.listen.phase !== "off" && !alertFrame(st) && !st.askOpen;
-  const dots = listening ? "● ● ●" : st.settings.cards.map((_, i) => (i === current ? "●" : "○")).join(" ");
+  const listening = id === "listen" && st.listen.phase !== "off" && !alertFrame(st) && !st.askOpen;
+  const dots = listening ? "● ● ●" : cards.map((_, i) => (i === current ? "●" : "○")).join(" ");
   if (!st.settings.showHints) return { dots, hint: "" };
   const alert = alertFrame(st);
   if (alert) return { dots, hint: alert.hint };
   if (st.askOpen) return { dots, hint: ASK.tapHint(st) };
   // Last launch's data, still refreshing (or offline): say how old it is instead of the hint.
-  const saved = st.saved[st.settings.cards[current]];
+  const saved = st.saved[id];
   if (saved && st.now.getTime() - saved > SAVED_LABEL_MS) return { dots, hint: `updated ${clock(new Date(saved), st.settings.use24h)}` };
-  return { dots, hint: CARDS[st.settings.cards[current]].tapHint(st) };
+  return { dots, hint: CARDS[id].tapHint(st) };
 }
 
 /** Header: card title on the left, time + battery on the right. */
 export function header(st: DashState, current: number, battery: number | null): { title: string; status: string } {
-  const title = alertFrame(st)?.title ?? (st.askOpen ? ASK : CARDS[st.settings.cards[current]]).title(st);
+  const cards = visibleCards(st);
+  const title = alertFrame(st)?.title ?? (st.askOpen ? ASK : CARDS[cards[current] ?? cards[0]]).title(st);
   const status = [clock(st.now, st.settings.use24h), battery != null ? `${battery}%` : ""].filter(Boolean).join("   ");
   return { title, status };
 }

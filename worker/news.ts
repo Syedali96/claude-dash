@@ -256,46 +256,85 @@ export async function news(env: Env, ctx?: Ctx): Promise<{ at: string; headlines
 
 // ---------- market snapshot ----------
 
-export interface Markets { sp500: number | null; btc: number | null; btcChange: number | null }
+export interface Markets {
+  sp500: number | null;
+  btc: number | null;
+  btcChange: number | null;
+  // Price lines for the glasses: S&P 500 since today's open (5-minute closes), BTC over the last 24 hours.
+  spark: { sp500: number[]; btc: number[] };
+}
 
-/** S&P 500 day change (Yahoo Finance) and Bitcoin price + 24h change (CoinGecko). Cached 5 minutes. */
+/** S&P 500 day change and Bitcoin price + 24h change (Yahoo Finance, Coinbase as a backup), with price lines. Cached 5 minutes. */
 export function markets(env: Env, ctx?: Ctx): Promise<Markets> {
-  return swr(env, ctx, "markets:v2", 5 * 60_000, fetchMarkets, 24 * 3600);
+  return swr(env, ctx, "markets:v3", 5 * 60_000, fetchMarkets, 24 * 3600);
+}
+
+interface YahooChart {
+  chart?: {
+    result?: {
+      meta?: { regularMarketPrice?: number; chartPreviousClose?: number; previousClose?: number; regularMarketChangePercent?: number };
+      timestamp?: number[];
+      indicators?: { quote?: { close?: (number | null)[] }[] };
+    }[];
+  };
+}
+
+/** At most `n` evenly spaced points (the last one always kept), rounded to keep the cache small. */
+function thin(values: number[], n = 48): number[] {
+  const v = values.filter((x) => Number.isFinite(x));
+  if (v.length <= n) return v.map((x) => Math.round(x * 100) / 100);
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) out.push(v[Math.round((i * (v.length - 1)) / (n - 1))]);
+  return out.map((x) => Math.round(x * 100) / 100);
+}
+
+const UA = { "User-Agent": "Mozilla/5.0 (ClaudeDash personal reader)" };
+const yahoo = (symbol: string, range: string, interval: string) =>
+  fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`, { headers: UA })
+    .then((r) => (r.ok ? (r.json() as Promise<YahooChart>) : null))
+    .catch(() => null);
+
+/** Closes (and their times, in seconds) from a Yahoo chart. */
+function closes(d: YahooChart | null): { t: number; v: number }[] {
+  const r = d?.chart?.result?.[0];
+  const ts = r?.timestamp ?? [];
+  const cl = r?.indicators?.quote?.[0]?.close ?? [];
+  return ts.flatMap((t, i) => (typeof cl[i] === "number" ? [{ t, v: cl[i] as number }] : []));
 }
 
 async function fetchMarkets(): Promise<Markets> {
-  const ua = { "User-Agent": "Mozilla/5.0 (ClaudeDash personal reader)" };
-  const [sp, btc] = await Promise.all([
-    fetch("https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?range=1d&interval=1d", { headers: ua })
-      .then((r) => r.json() as Promise<{ chart?: { result?: { meta?: { regularMarketPrice?: number; chartPreviousClose?: number; regularMarketChangePercent?: number } }[] } }>)
-      .then((d) => {
-        const m = d.chart?.result?.[0]?.meta;
-        if (m?.regularMarketChangePercent != null) return m.regularMarketChangePercent;
-        return m?.regularMarketPrice && m.chartPreviousClose ? ((m.regularMarketPrice - m.chartPreviousClose) / m.chartPreviousClose) * 100 : null;
-      })
-      .catch(() => null),
-    // Bitcoin: Yahoo Finance first, Coinbase (24h open vs last) as a backup.
-    fetch("https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD?range=1d&interval=1d", { headers: ua })
-      .then((r) => r.json() as Promise<{ chart?: { result?: { meta?: { regularMarketPrice?: number; chartPreviousClose?: number; regularMarketChangePercent?: number } }[] } }>)
-      .then((d) => {
-        const m = d.chart?.result?.[0]?.meta;
-        if (!m?.regularMarketPrice) return null;
-        const pct = m.regularMarketChangePercent ?? (m.chartPreviousClose ? ((m.regularMarketPrice - m.chartPreviousClose) / m.chartPreviousClose) * 100 : undefined);
-        return { usd: m.regularMarketPrice, usd_24h_change: pct };
-      })
-      .catch(() => null)
-      .then(async (y) => {
-        if (y) return y;
-        const s = (await fetch("https://api.exchange.coinbase.com/products/BTC-USD/stats", { headers: ua }).then((r) => r.json()).catch(() => null)) as { open?: string; last?: string } | null;
-        if (!s?.last) return null;
-        const last = Number(s.last), open = Number(s.open);
-        return { usd: last, usd_24h_change: open ? ((last - open) / open) * 100 : undefined };
-      }),
-  ]);
+  const [spData, btcData] = await Promise.all([yahoo("^GSPC", "1d", "5m"), yahoo("BTC-USD", "2d", "15m")]);
+
+  // S&P 500: day change, and the line since today's open.
+  const spMeta = spData?.chart?.result?.[0]?.meta;
+  let sp: number | null = null;
+  if (spMeta?.regularMarketChangePercent != null) sp = spMeta.regularMarketChangePercent;
+  else if (spMeta?.regularMarketPrice && spMeta.chartPreviousClose) sp = ((spMeta.regularMarketPrice - spMeta.chartPreviousClose) / spMeta.chartPreviousClose) * 100;
+  const spLine = closes(spData).map((p) => p.v);
+
+  // Bitcoin: the last 24 hours from Yahoo; Coinbase (15-minute candles) as a backup.
+  const dayAgo = Date.now() / 1000 - 24 * 3600;
+  let btcLine = closes(btcData).filter((p) => p.t >= dayAgo).map((p) => p.v);
+  let btc: number | null = btcData?.chart?.result?.[0]?.meta?.regularMarketPrice ?? btcLine.at(-1) ?? null;
+  let btcChange: number | null = btcLine.length >= 2 ? ((btcLine[btcLine.length - 1] - btcLine[0]) / btcLine[0]) * 100 : null;
+  if (!btc || btcLine.length < 2) {
+    const candles = (await fetch("https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=900", { headers: UA })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null)) as [number, number, number, number, number, number][] | null; // [time, low, high, open, close, volume], newest first
+    if (Array.isArray(candles) && candles.length) {
+      btcLine = candles.filter((c) => c[0] >= dayAgo).reverse().map((c) => c[4]);
+      btc = btcLine.at(-1) ?? btc;
+      const open = candles.filter((c) => c[0] >= dayAgo).at(-1)?.[3];
+      if (btc && open) btcChange = ((btc - open) / open) * 100;
+    }
+  }
+  if (btc != null && btcLine.length) btcLine[btcLine.length - 1] = btc; // end the line at the price shown
+
   const out: Markets = {
     sp500: sp == null ? null : Math.round(sp * 100) / 100,
-    btc: btc?.usd ?? null,
-    btcChange: btc?.usd_24h_change == null ? null : Math.round(btc.usd_24h_change * 100) / 100,
+    btc,
+    btcChange: btcChange == null ? null : Math.round(btcChange * 100) / 100,
+    spark: { sp500: thin(spLine), btc: thin(btcLine) },
   };
   if (out.sp500 == null && out.btc == null) throw new Error("Market prices unavailable.");
   return out;

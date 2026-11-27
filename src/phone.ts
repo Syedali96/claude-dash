@@ -2,6 +2,7 @@
 import { setupUrl } from "./api";
 import type { Frame } from "./layout";
 import { CARD_LABELS, type CardId, type LoggedSet, type Settings } from "./settings";
+import { toDataUrl } from "./widgets";
 
 type Gesture = "next" | "prev" | "tap" | "double" | "long" | "ltap" | "ldouble";
 
@@ -12,7 +13,7 @@ interface Hooks {
 }
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
-const ALL: CardId[] = ["agenda", "news", "inbox", "gym", "brief", "listen"];
+const ALL: CardId[] = ["agenda", "news", "inbox", "gym", "reminders", "listen"];
 
 export function mountPhoneUI(initial: Settings, hooks: Hooks) {
   let s = structuredClone(initial);
@@ -53,8 +54,6 @@ export function mountPhoneUI(initial: Settings, hooks: Hooks) {
   }
 
   function fill() {
-    $<HTMLTextAreaElement>("#tasks").value = s.tasks.join("\n");
-    $<HTMLTextAreaElement>("#prompt").value = s.briefPrompt;
     $<HTMLInputElement>("#sleep").value = String(s.sleepSeconds);
     for (const k of ["heavy", "compound", "isolation"] as const) $<HTMLInputElement>(`#rest-${k}`).value = String(s.rest[k]);
     $<HTMLInputElement>("#h24").checked = s.use24h;
@@ -67,14 +66,6 @@ export function mountPhoneUI(initial: Settings, hooks: Hooks) {
     renderCards();
   }
 
-  $("#tasks").addEventListener("change", (e) => {
-    s.tasks = (e.target as HTMLTextAreaElement).value.split("\n").map((t) => t.trim()).filter(Boolean);
-    emit();
-  });
-  $("#prompt").addEventListener("change", (e) => {
-    s.briefPrompt = (e.target as HTMLTextAreaElement).value.trim() || initial.briefPrompt;
-    emit();
-  });
   $("#sleep").addEventListener("change", (e) => {
     const v = Number((e.target as HTMLInputElement).value);
     s.sleepSeconds = Number.isFinite(v) ? Math.min(600, Math.max(0, v)) : 30;
@@ -144,6 +135,13 @@ export function mountPhoneUI(initial: Settings, hooks: Hooks) {
         Object.assign(d.style, { left: `${(t.x / 576) * 100}%`, top: `${(t.y / 202) * 100}%`, width: `${(t.w / 576) * 100}%`, height: `${(t.h / 202) * 100}%` });
         d.textContent = t.text;
         body.appendChild(d);
+      }
+      // Drawn pictures (rings, sparklines, the email box), placed like on the glasses.
+      for (const im of f.body.images ?? []) {
+        const el = document.createElement("img");
+        Object.assign(el.style, { position: "absolute", left: `${(im.x / 576) * 100}%`, top: `${((im.y - 42) / 202) * 100}%`, width: `${(im.w / 576) * 100}%`, height: `${(im.h / 202) * 100}%` });
+        body.appendChild(el);
+        toDataUrl(im).then((url) => (el.src = url)).catch(() => {});
       }
       $("#pv-left").textContent = "";
       $("#pv-right").textContent = "";

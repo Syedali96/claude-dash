@@ -80,9 +80,8 @@ Glasses (G2) ⇄ Even app WebView (phone) runs the Claude Dash web app (Vite + T
 | `GET /api/whoop?tz=` | Recovery, HRV, RHR, sleep, need, efficiency, strain, plus `bedtime` and a one-sentence `tip` |
 | `GET /api/news` | Up to 10 relevant headlines |
 | `GET /api/news/article?n=` | Easy-to-read summary of story n |
-| `GET /api/markets` | `{sp500, btc, btcChange}`, cached 5 minutes |
-| `POST /api/brief` | Day plan: REMINDERS (exact list) + TODAY'S FOCUS (Claude bullets) |
-| `GET/POST /api/reminders` | Reminders from the iOS Shortcut, accepting `{items: text or array}` |
+| `GET /api/markets` | `{sp500, btc, btcChange, spark:{sp500[], btc[]}}` (S&P since the open, 5-min closes; BTC last 24 h, 15-min; at most 48 points each), cached 5 minutes (`markets:v3`) |
+| `GET/POST /api/reminders[?tz=]` | Reminders from the iOS Shortcut (POST `{items: text or array}`). GET returns `{items, at, today}`; `today` = sent today in `tz` (default America/New_York). `/api/brief` was removed in 0.15.0. |
 | `POST /api/gym/parse` | Raw 16 kHz PCM in, `{text, set:{exercise,weight,unit,reps}}` out |
 | `POST /api/gym/command` | `{audio(base64 PCM) or text, today[], known[]}` in, `{text, command}` out. Command is log / undo / delete / edit / finish / query / none |
 | `POST /api/ask` | `{audio(base64 PCM) or text, history, now, timeZone}` in, `{question, answer}` out |
@@ -91,7 +90,7 @@ Glasses (G2) ⇄ Even app WebView (phone) runs the Claude Dash web app (Vite + T
 
 ## 4. The glasses app today (v0.8.0)
 
-**Cards, in order: Today → News → Inbox → Gym → Day plan → Listen.** Removed along the way: Home, Tasks, Focus, Teleprompter, Ask Claude (0.14.0: now an overlay opened from the left arm).
+**Cards, in order: Today → News → Inbox → Gym → Reminders → Listen.** (0.15.0: Day plan became Reminders.) Removed along the way: Home, Tasks, Focus, Teleprompter, Ask Claude (0.14.0: now an overlay opened from the left arm).
 
 ### Gestures
 
@@ -107,7 +106,6 @@ The SDK reports which surface was touched in `sysEvent.eventSource` (1 right arm
 
 Double-tap special cases:
 - **News:** open or close a story.
-- **Day plan:** new plan.
 - **Today, when there are unread alerts:** read the new emails.
 
 ### Auto-sleep
@@ -145,11 +143,9 @@ Double-tap special cases:
   - Rest time is a base 90 seconds (phone setting), +30 seconds when WHOOP recovery is yellow, +60 when red.
   - After logging, it shows last session's numbers for that exercise ("last time (Nov 14): 185x8 185x7").
   - History stays on the phone only (Even app storage, up to 2000 sets). The phone settings show the last 14 days and an "Undo last set" button.
-- **Day plan**
-  - REMINDERS: iPhone reminders due today as bullets.
-  - TODAY'S FOCUS: on its own page, 3–5 one-line bullets of 38 characters or fewer. No clock times for tasks; meetings are the anchors.
-  - Inputs: calendar, emails, follow-ups, WHOOP, reminders, phone tasks, today's gym sets, weather.
-  - Refreshes on open and every 2 hours. Double tap makes a new one.
+- **Reminders** (replaced Day plan in 0.15.0)
+  - Only today's iPhone reminders (KV `reminders:today`, POSTed by a Shortcut automation at 6 AM and when the Even app opens), one "◆" per item, tap pages.
+  - Hidden completely (not in the dots or swipe order) when the stored list isn't from today or is empty.
 - **Ask Claude** (an overlay since 0.14.0, flag `st.askOpen`)
   - A left-arm tap on any card opens Ask over it and starts listening. Left tap again sends; on an answer it pages, then asks a follow-up. Left double tap = new chat. A swipe (ring or right arm) closes Ask (cancels if listening) and returns to the card. Ring taps also work Ask while it's open. Hold = display off.
   - Speak, then tap again (stops by itself after 15 seconds). Groq transcribes it, then Claude uses tools to answer: `search_email` (all 4 inboxes, full text, Gmail search syntax, at most 2 searches per question), `get_calendar`, `get_whoop`, `get_reminders`, `get_inbox_summary`, `get_news`, plus Anthropic `web_search` (at most 2 uses).
@@ -231,6 +227,7 @@ npx wrangler kv key delete --binding TOKENS --remote "<key>"   # clear a cache (
 - 0.11.0: faster Listen: background transcription every 30 s, silence dropped, raw audio instead of base64, streamed answer (topic first).
 - 0.12.0 (Nov 26): speed. Worker returns saved copies at once and refreshes in the background (`worker/cache.ts`, keys `inbox:v2`, `whoop:today:v2`, `markets:v2`); a 15-minute cron (`scheduled` in `worker/index.ts`, `triggers` in `wrangler.jsonc`) rebuilds inbox, news, WHOOP and markets, and the inbox only re-asks Claude when the threads changed (SHA-1 signature). Ask streams: multipart in (raw audio), reply is `QUESTION: ...\n` then text, `\x1e` = drop the text before a lookup. Gym also sends raw audio (multipart; JSON still accepted). Streams send `Content-Encoding: identity` (gzip held Listen/Ask text until the end). Email alerts and the WHOOP tip use `claude-haiku-5-5` (about 1 s faster, measured); gym and everything else stay on Opus. Phone saves the last screens (`claude-dash-snapshot`) and shows them at launch, with "updated h:mm" in the footer when over 5 minutes old; the day plan isn't remade at launch if under 2 hours old. Redraws only swap changed text unless the layout changed or more than 3 boxes changed. Listen dots are smaller and animate (one bright dot steps every 0.5 s). Ali chose to keep background polling while asleep as it was.
 - 0.13.0: Listen answers first and searches after ("> LATEST" line), 10-second background chunks, 2 s max wait at tap.
+- 0.15.0 (Nov 27): "Glyph mix". Small drawn pictures (Glyph, MIT, see THIRD_PARTY_NOTICES.md) in image containers, made in `src/widgets.ts` and sent as PNGs like the posture cat. Each picture has a `key`; it's only resent when the key changes, one send at a time, newer wishes replace older ones (in-flight = skip). Today page 2: recovery ring + zone + note (tip shortened to ~26 chars, cache `whoop:tip4`). News: sparklines at the right of each market tile, BTC shown as `$97.2k  -1.8%`. Inbox: wait time column (2h/5h/1d/3d), title `INBOX · 4 accounts`. Ask tool `dismiss_inbox_item` (KV `inbox:dismissed`, thread id + newest message time; comes back when a newer message arrives; Gmail untouched); the stream ends with `\x1f` and the glasses reload Inbox. Gym rest: countdown ring (1 s, or every 2-5 s with the exact time as text if image sends get slow, `tickStep()`), set + last time top right. Listen: still mic picture, no dot animation. New email: a 288x144 box over the current card (tap = full reader); in the simulator the picture hides the text under it (`BLANK_UNDER_COVER` in layout.ts can blank tiles if the glasses don't). Day plan card replaced by Reminders (settings v14 migrates `brief` → `reminders`; hidden when nothing was sent today). Menu "New day plan" became "Refresh everything". Posture cat calmer (bigger tilt, 45 s / 2 min, 10 min quiet after). Image sends took 3-6 ms in the simulator (no Bluetooth); real-glasses timing not measured yet. Dev hooks: `?gymrest`, `?alertdemo`, `?card=<id>`.
 - 0.14.0: Ask Claude card removed; a left-arm tap opens Ask over any card (`st.askOpen`). Settings v13 drops "ask" from saved card lists. Built together with the posture cat.
 - Testing hooks (dev only): `?savedtest` shows the "updated" footer; `?listentest=<transcript>` shows a Listen answer, `?listentest=dots` the listening screen; `LOCAL_API=1 npm run dev` uses the local Worker; `?gymseed` loads sample history, `?gymtest=a|b` runs typed gym commands, `?asktest=q1|q2` asks typed questions in one chat (opens the Ask overlay).
 

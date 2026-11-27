@@ -15,6 +15,7 @@ import {
 import type { Body, Tile } from "./cards";
 import { catContainer } from "./posture";
 import type { Settings } from "./settings";
+import { type Img, imgContainer, MAX_IMAGES } from "./widgets";
 
 export const SCREEN = { width: 576, height: 288 };
 /** The body area tiles are placed in (tile x/y are relative to it). */
@@ -33,7 +34,7 @@ export const MENU = { refresh: 1, home: 2, close: 3 } as const;
 
 const menuObject = new MenuContainerProperty({
   menuItems: [
-    new MenuItemProperty({ itemID: MENU.refresh, itemName: "New day plan" }),
+    new MenuItemProperty({ itemID: MENU.refresh, itemName: "Refresh everything" }),
     new MenuItemProperty({ itemID: MENU.home, itemName: "Go to Today" }),
     new MenuItemProperty({ itemID: MENU.close, itemName: "Close Claude Dash" }),
   ],
@@ -47,6 +48,25 @@ export interface Frame {
   hint: string; // "2/2   tap  more"
   cat?: boolean; // posture cat pop-up in the bottom-right corner
 }
+
+/** The drawn pictures on a frame (at most 3; the cat has its own box). */
+export const imagesOf = (f: Frame): Img[] => (f.body.images ?? []).slice(0, MAX_IMAGES);
+
+/**
+ * Text tiles that sit under a covering picture (the email box) are blanked, so their text
+ * can't show through or around it.
+ */
+export const BLANK_UNDER_COVER = false;
+function covered(t: Tile, images: Img[]): boolean {
+  if (!BLANK_UNDER_COVER) return false;
+  return images.some((im) => im.cover && BODY.x + t.x < im.x + im.w && im.x < BODY.x + t.x + t.w && BODY.y + t.y < im.y + im.h && im.y < BODY.y + t.y + t.h);
+}
+
+/** The text a tile really shows (blank when a covering picture is on top of it). */
+export const tileText = (f: Frame, i: number) => {
+  const t = f.body.tiles[i];
+  return t && covered(t, imagesOf(f)) ? " " : (t?.text || " ");
+};
 
 function text(
   id: number, name: string, x: number, y: number, w: number, h: number,
@@ -79,7 +99,7 @@ function page(frame: Frame, s: Settings) {
   const cap = captureIndex(frame.body.tiles);
   const tiles = frame.body.tiles.map((t, i) =>
     text(
-      TILE_ID + i, `tile${i}`, BODY.x + t.x, BODY.y + t.y, t.w, t.h, t.text || " ",
+      TILE_ID + i, `tile${i}`, BODY.x + t.x, BODY.y + t.y, t.w, t.h, tileText(frame, i),
       t.dim ? Math.max(1, b.body - 2) : b.body, i === cap, 10 + i, !!t.border, t.border ? PAD.tile : PAD.free,
     ),
   );
@@ -91,13 +111,14 @@ function page(frame: Frame, s: Settings) {
     text(r.dots.id, r.dots.name, r.dots.x, r.dots.y, r.dots.w, r.dots.h, frame.dots, b.footer + 1, false, 3, false, 4),
     text(r.hint.id, r.hint.name, r.hint.x, r.hint.y, r.hint.w, r.hint.h, frame.hint, b.footer, false, 4, false, 4),
   ];
-  const imageObject = frame.cat ? [catContainer()] : [];
+  const imageObject = [...imagesOf(frame).map(imgContainer), ...(frame.cat ? [catContainer()] : [])];
   return { containerTotalNum: textObject.length + imageObject.length, textObject, imageObject, menuObject };
 }
 
 /** True when the tile arrangement changed (needs a rebuild, not just new text). */
 export function shapeChanged(a: Frame, b: Frame): boolean {
-  const sig = (f: Frame) => `${captureIndex(f.body.tiles)}:` + f.body.tiles.map((t) => `${t.x},${t.y},${t.w},${t.h},${!!t.border},${!!t.dim}`).join("|") + (f.cat ? ":cat" : "");
+  const sig = (f: Frame) => `${captureIndex(f.body.tiles)}:` + f.body.tiles.map((t) => `${t.x},${t.y},${t.w},${t.h},${!!t.border},${!!t.dim}`).join("|") + (f.cat ? ":cat" : "")
+    + imagesOf(f).map((im) => `#${im.x},${im.y},${im.w},${im.h},${!!im.cover}`).join("");
   return sig(a) !== sig(b);
 }
 
