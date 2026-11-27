@@ -39,11 +39,12 @@ export type CatPose = "warn" | "limp";
 export const CAT = { id: 30, name: "cat", x: 504, y: 216, w: 64, h: 64, z: 50 } as const;
 
 const PACE = ImuReportPace.P1000; // slowest the glasses offer: about one reading a second
-const TILT_X = -0.22; // head pitched down past this counts as slouching
+const TILT_X = -0.3; // head pitched down past this counts as slouching (a quick glance down doesn't)
 const EXIT_MARGIN = 0.08; // must come back up this much past the line to count as fixed
 const EMA_ALPHA = 0.5;
-const WARN_MS = 10_000; // "!" after this long slouching
-const LIMP_MS = 30_000; // limp after this long
+const WARN_MS = 45_000; // "!" after this long slouching
+const LIMP_MS = 120_000; // limp after this long
+const QUIET_MS = 10 * 60_000; // after you sit up, no new cat for this long
 const REARM_MS = 20_000; // no readings for this long: ask for them again (they stop while you hold still, too)
 
 let latestX: number | null = null;
@@ -56,6 +57,7 @@ let lastArm = 0;
 let armed = false;
 let foreground = true;
 let pose: CatPose | null = null;
+let quietUntil = 0; // no new pop-up before this time
 let sentPose: CatPose | null = null;
 let sending = false;
 const pngs: Partial<Record<CatPose, Uint8Array>> = {};
@@ -130,6 +132,9 @@ export function tick(bridge: EvenAppBridge | null, enabled: boolean, allowed: bo
   let next: CatPose | null = null;
   if (holdMs >= LIMP_MS) next = "limp";
   else if (holdMs >= WARN_MS) next = "warn";
+  // You sat up after the cat showed: give it a rest before the next one.
+  if (pose && !next) quietUntil = now + QUIET_MS;
+  if (!pose && now < quietUntil) next = null; // still resting (a cat already showing can still go limp)
   if (!allowed) next = null; // keep timing, just don't show it
 
   const changed = next !== pose;
