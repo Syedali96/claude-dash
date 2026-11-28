@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Dash</title>
+    <style>
+      :root {
+        --bg: #0e0f0f; --panel: #17191a; --line: #2a2d2e; --text: #e8e8e6; --muted: #9a9d9b;
+        --hud: #5dff8a; --accent: #d97757;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 -apple-system, system-ui, sans-serif; }
+      main { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      #status { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+      #status.ok { color: var(--hud); }
+      .glasses { aspect-ratio: 2 / 1; width: 100%; background: #000; border-radius: 12px; border: 1px solid var(--line);
+        position: relative; overflow: hidden; font: 13px/1.35 ui-monospace, Menlo, monospace; color: var(--hud); }
+      .glasses div { position: absolute; left: 0; right: 0; padding: 1.2% 1.4%; white-space: pre-wrap; overflow: hidden; }
+      #pv-header { top: 0; height: 14%; }
+      #pv-body { top: 14.6%; height: 70.1%; }
+      .pv-tile { position: absolute; padding: 3px 4px; white-space: pre; overflow: hidden; box-sizing: border-box; }
+      .pv-tile.border { border: 1px solid #1f8a45; border-radius: 6px; }
+      .pv-tile.dim { opacity: .55; }
+      #pv-footer { bottom: 0; height: 12.5%; font-size: 11px; }
+      #pv-body.cols { border-color: transparent; }
+      #pv-left { top: 15.3%; height: 70.8%; right: auto !important; width: 16%; }
+      #pv-right { top: 15.3%; height: 70.8%; left: 16% !important; }
+      input[type=text], input[type=password] { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; margin: 4px 0 10px; }
+      a { color: var(--accent); }
+      .pad { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 24px; }
+      button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font: inherit; }
+      button:disabled { opacity: .35; }
+      section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }
+      section h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+      textarea, select, input[type=number] { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; }
+      textarea { min-height: 84px; resize: vertical; }
+      ul { list-style: none; padding: 0; margin: 0; }
+      li { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
+      li:last-child { border-bottom: 0; }
+      .move button { padding: 4px 10px; }
+      .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 0; }
+      input[type=range] { flex: 1; max-width: 220px; accent-color: var(--accent); }
+      small { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Claude Dash</h1>
+      <p id="status">Starting…</p>
+
+      <div class="glasses" aria-label="Glasses preview">
+        <div id="pv-header"></div>
+        <div id="pv-body"></div>
+        <div id="pv-left"></div>
+        <div id="pv-right"></div>
+        <div id="pv-footer"></div>
+      </div>
+      <div class="pad" aria-label="Simulate ring gestures">
+        <button data-g="prev">Swipe up</button>
+        <button data-g="next">Swipe down</button>
+        <button data-g="tap">Tap</button>
+        <button data-g="double">Double tap</button>
+        <button data-g="long">Long press</button>
+        <button data-g="ltap">Left arm tap (Ask)</button>
+        <button data-g="ldouble">Left arm 2x (new chat)</button>
+      </div>
+
+      <section>
+        <h2>Cards</h2>
+        <ul id="cards"></ul>
+        <small>Swipe on the ring to move between them. Double tap goes to Today, long press turns the display off. Tap the left arm of the glasses on any card to ask Claude.</small>
+      </section>
+
+      <section>
+        <h2>Reminders</h2>
+        <small>The Reminders card shows the iPhone reminders due today, sent by your "Send Reminders" Shortcut (every day at 6 AM and when the Even app opens). It hides itself on days with none.</small>
+      </section>
+
+      <section>
+        <h2>Gym log</h2>
+        <div class="row"><label for="rest-heavy">Rest after heavy lifts (squat, bench, deadlift, OHP, rows), seconds</label><input id="rest-heavy" type="number" min="15" max="600" style="max-width:90px" /></div>
+        <div class="row"><label for="rest-compound">Rest after other compound lifts, seconds</label><input id="rest-compound" type="number" min="15" max="600" style="max-width:90px" /></div>
+        <div class="row"><label for="rest-isolation">Rest after isolation lifts (curls, raises), seconds</label><input id="rest-isolation" type="number" min="15" max="600" style="max-width:90px" /></div>
+        <small>On the Gym card, tap, say "bench, 185, 8 reps", then tap again. Say "cancel that" or "delete my second bench set" to fix a set, and "workout complete" for your summary. Rest grows by 30 s on yellow WHOOP days and 60 s on red.</small>
+        <div id="gym-log" style="margin-top:10px;display:grid;gap:4px;font-size:14px"></div>
+        <button id="gym-undo" style="margin-top:10px">Undo last set</button>
+      </section>
+
+      <section>
+        <h2>Connection</h2>
+        <label for="server">Server URL</label>
+        <input id="server" type="text" placeholder="Blank while testing from your Mac" autocomplete="off" />
+        <label for="token">Access token</label>
+        <input id="token" type="password" placeholder="Blank while testing from your Mac" autocomplete="off" />
+        <small>Connect Google once, on your Mac's browser: <a id="setup" target="_blank" rel="noopener">open setup page</a></small>
+      </section>
+
+      <section>
+        <h2>Display</h2>
+        <div class="row"><span>Header brightness</span><input id="b-header" type="range" min="0" max="4" /></div>
+        <div class="row"><span>Body brightness</span><input id="b-body" type="range" min="0" max="4" /></div>
+        <div class="row"><span>Footer brightness</span><input id="b-footer" type="range" min="0" max="4" /></div>
+        <div class="row"><label for="h24">24-hour clock</label><input id="h24" type="checkbox" /></div>
+        <div class="row"><label for="hints">Gesture hints in footer</label><input id="hints" type="checkbox" /></div>
+        <div class="row"><label for="posture">Posture cat (pops up when you slouch)</label><input id="posture" type="checkbox" /></div>
+        <div class="row"><label for="sleep">Sleep after (seconds idle, 0 = never)</label><input id="sleep" type="number" min="0" max="600" step="5" style="max-width:90px" /></div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

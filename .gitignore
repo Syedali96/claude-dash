@@ -1,0 +1,20 @@
+node_modules
+dist
+*.ehpk
+.wrangler
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+!.dev.vars.example
+*secret*.json
+*credentials*.json
+*.pem
+*.key
+.DS_Store
+sim.log
+
+# Generated from your .dev.vars by scripts/local-config.mjs
+wrangler.local.jsonc
+app.local.json
+PROJECT_CONTEXT.md

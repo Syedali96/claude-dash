@@ -1,0 +1,32 @@
+# Copy to .dev.vars and fill in. .dev.vars stays on your computer (it's git-ignored).
+# `npm run secrets` uploads these to your Cloudflare Worker. See README.md.
+# Keep comments on their own lines.
+
+# https://console.anthropic.com
+ANTHROPIC_API_KEY=
+# Locks your Worker so only your glasses can use it. Any long random string: openssl rand -hex 32
+APP_TOKEN=
+# Voice (Ask, Gym, Listen): https://console.groq.com
+GROQ_API_KEY=
+# Google Cloud OAuth client (README, step 4)
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+# Optional: https://developer.whoop.com
+WHOOP_CLIENT_ID=
+WHOOP_CLIENT_SECRET=
+
+# Inboxes to read, as email:tag (the tag shows next to each inbox item). The first one is your calendar.
+GOOGLE_ACCOUNTS=me@work.com:wrk,me@gmail.com:gml
+# So Claude knows who "I" is
+OWNER_NAME=Sam
+ABOUT_ME=founder of a small design studio
+# What the News card should favor, most important first. Empty = AI, startups and VC,
+# the music business, wearables and AR, big tech.
+NEWS_INTERESTS=
+
+# From: npx wrangler kv namespace create TOKENS
+KV_NAMESPACE_ID=
+# Your Worker's address, from npm run deploy, e.g. https://claude-dash.your-name.workers.dev
+SERVER_URL=
+# Your app's id on Even Hub, e.g. com.yourname.claudedash
+PACKAGE_ID=

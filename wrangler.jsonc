@@ -1,0 +1,15 @@
+{
+  // The always-on server for Claude Dash (Cloudflare Workers, free plan).
+  "name": "claude-dash",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [
+    // Stores Google / WHOOP sign-in tokens. Put your id in .dev.vars as KV_NAMESPACE_ID
+    // (from `npx wrangler kv namespace create TOKENS`); npm run deploy fills it in here.
+    { "binding": "TOKENS", "id": "YOUR_KV_NAMESPACE_ID" }
+  ],
+  // Keeps the inbox, news and WHOOP ready so the glasses never wait (worker/index.ts "scheduled").
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "observability": { "enabled": true }
+}
